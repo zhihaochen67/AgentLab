@@ -1,0 +1,10 @@
+name: repo-doctor-basic
+
+cases:
+  - id: calculate_total_001
+    repository: fixtures/calculate_total_001
+    task: Fix calculate_total so that all tests pass.
+    expected:
+      tests_pass: true
+      modified_files:
+        - inventory.py

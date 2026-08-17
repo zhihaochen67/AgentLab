@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentlab"
+version = "0.1.0"
+description = "Evaluation and observability platform for LLM agents"
+requires-python = ">=3.10"
+
+dependencies = [
+    "typer",
+    "pydantic",
+    "pyyaml",
+    "pytest",
+    "sqlalchemy",
+    "rich"
+]
+
+[project.scripts]
+agentlab = "agentlab.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentlab*"]
+exclude = ["datasets*", "fixtures*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
