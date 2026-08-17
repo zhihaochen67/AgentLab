@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentlab.adapters.base import AgentAdapter
+from agentlab.adapters.base import AgentAdapter, AgentExecutionError, AgentRunResult
 
 WORKSPACE_MARKER = ".agentlab-workspace"
 _PYTHON_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py")
@@ -23,7 +23,7 @@ class RepoDoctorAdapter(AgentAdapter):
     executable: str = "repo-doctor"
     verification_timeout: int = 120
 
-    def repair(self, workspace: Path, task: str) -> None:
+    def repair(self, workspace: Path, task: str) -> AgentRunResult:
         """Run one Repo Doctor semantic repair in the temporary workspace.
 
         Repo Doctor discovers the problem from failed verification output, so its
@@ -53,12 +53,13 @@ class RepoDoctorAdapter(AgentAdapter):
                 text=True,
                 check=False,
             )
+            agent_result = AgentRunResult(result.returncode, result.stdout, result.stderr)
             if result.returncode != 0:
-                detail = (result.stderr or result.stdout).strip()
-                message = f"Repo Doctor exited with status {result.returncode}"
-                if detail:
-                    message += f": {detail}"
-                raise RuntimeError(message)
+                raise AgentExecutionError(
+                    f"Repo Doctor exited with status {result.returncode}",
+                    agent_result,
+                )
+            return agent_result
         finally:
             if git_directory.is_dir():
                 shutil.rmtree(git_directory, onerror=self._remove_readonly)

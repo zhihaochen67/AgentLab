@@ -48,7 +48,7 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:
-            RepoDoctorAdapter(verification_timeout=45).repair(workspace, "fix VALUE")
+            result = RepoDoctorAdapter(verification_timeout=45).repair(workspace, "fix VALUE")
 
             assert calls[-1] == (
                 (
@@ -69,5 +69,7 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
             ]
             assert not (workspace / "requirements.txt").exists()
             assert not (workspace / WORKSPACE_MARKER).exists()
+            assert result.returncode == 0
+            assert result.stdout == "Patch applied"
         finally:
             shutil.rmtree(workspace, ignore_errors=True)

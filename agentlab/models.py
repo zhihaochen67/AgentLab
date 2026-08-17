@@ -1,4 +1,10 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agentlab.tracer import TraceEvent
 
 
 @dataclass
@@ -16,3 +22,5 @@ class EvalResult:
     tests_before_passed: bool
     tests_after_passed: bool
     error: str | None = None
+    run_id: str = ""
+    trace: tuple[TraceEvent, ...] = field(default_factory=tuple)
