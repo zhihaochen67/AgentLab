@@ -1,10 +1,13 @@
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import yaml
 
+from agentlab.adapters import AgentAdapter, RepoDoctorAdapter
+from agentlab.adapters.repo_doctor import WORKSPACE_MARKER
 from agentlab.models import EvalCase, EvalResult
 
 
@@ -36,6 +39,11 @@ def create_workspace(repository: str) -> Path:
         source,
         temp_dir,
         dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".git"),
+    )
+    (temp_dir / WORKSPACE_MARKER).write_text(
+        "AgentLab temporary evaluation workspace.\n",
+        encoding="utf-8",
     )
 
     return temp_dir
@@ -43,23 +51,26 @@ def create_workspace(repository: str) -> Path:
 
 def run_pytest(workspace: Path) -> bool:
     result = subprocess.run(
-        ["python", "-m", "pytest", "-q"],
+        [sys.executable, "-B", "-m", "pytest", "-q"],
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
     return result.returncode == 0
 
 
-def evaluate_case(case: EvalCase) -> EvalResult:
+def evaluate_case(case: EvalCase, adapter: AgentAdapter | None = None) -> EvalResult:
     workspace = create_workspace(case.repository)
+    before_passed = False
+    after_passed = False
 
     try:
         before_passed = run_pytest(workspace)
 
-        # 这里以后接入 Repo Doctor。
-        # 目前故意不修改代码。
+        active_adapter = adapter or RepoDoctorAdapter()
+        active_adapter.repair(workspace, case.task)
 
         after_passed = run_pytest(workspace)
 
@@ -70,13 +81,13 @@ def evaluate_case(case: EvalCase) -> EvalResult:
             tests_after_passed=after_passed,
         )
 
-    except Exception as e:
+    except Exception as error:  # Agent failures are represented in EvalResult.
         return EvalResult(
             case_id=case.id,
             passed=False,
-            tests_before_passed=False,
-            tests_after_passed=False,
-            error=str(e),
+            tests_before_passed=before_passed,
+            tests_after_passed=after_passed,
+            error=str(error),
         )
 
     finally:

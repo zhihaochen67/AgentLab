@@ -27,3 +27,6 @@ exclude = ["datasets*", "fixtures*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["fixtures"]
+pythonpath = ["."]
+addopts = ["-p", "no:cacheprovider"]
