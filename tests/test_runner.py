@@ -3,8 +3,9 @@ import tempfile
 from pathlib import Path
 
 from agentlab.adapters import AgentAdapter, AgentRunResult
+from agentlab.dataset import load_dataset
 from agentlab.models import EvalCase
-from agentlab.runner import create_workspace, evaluate_case, load_dataset
+from agentlab.runner import create_workspace, evaluate_case
 
 
 class FixingAdapter(AgentAdapter):
@@ -72,7 +73,7 @@ def make_failing_repository(root: Path) -> Path:
 def test_load_dataset() -> None:
     cases = load_dataset("datasets/repo_doctor_basic.yaml")
 
-    assert len(cases) == 1
+    assert len(cases) == 11
     assert cases[0].id == "calculate_total_001"
     assert cases[0].expected["tests_pass"] is True
 

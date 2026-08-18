@@ -7,8 +7,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from agentlab.adapters import (
     AgentAdapter,
     AgentExecutionError,
@@ -28,25 +26,6 @@ class PytestRunResult:
     returncode: int
     stdout: str
     stderr: str
-
-
-def load_dataset(path: str) -> list[EvalCase]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    cases = []
-
-    for item in data["cases"]:
-        cases.append(
-            EvalCase(
-                id=item["id"],
-                repository=item["repository"],
-                task=item["task"],
-                expected=item.get("expected", {}),
-            )
-        )
-
-    return cases
 
 
 def create_workspace(repository: str) -> Path:

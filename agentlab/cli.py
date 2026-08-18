@@ -4,8 +4,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from agentlab.dataset import load_dataset
 from agentlab.models import EvalResult
-from agentlab.runner import evaluate_case, load_dataset
+from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
 

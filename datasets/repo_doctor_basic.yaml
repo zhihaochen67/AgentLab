@@ -8,3 +8,83 @@ cases:
       tests_pass: true
       modified_files:
         - inventory.py
+
+  - id: slice_window_001
+    repository: fixtures/slice_window_001
+    task: Fix take_first so it returns exactly the requested prefix for all tested counts.
+    expected:
+      tests_pass: true
+      modified_files:
+        - sequences.py
+
+  - id: discount_threshold_001
+    repository: fixtures/discount_threshold_001
+    task: Fix the discount threshold eligibility behavior so all tests pass.
+    expected:
+      tests_pass: true
+      modified_files:
+        - pricing.py
+
+  - id: binary_search_001
+    repository: fixtures/binary_search_001
+    task: Fix binary_search boundary handling while preserving its documented return behavior.
+    expected:
+      tests_pass: true
+      modified_files:
+        - search.py
+
+  - id: palindrome_normalization_001
+    repository: fixtures/palindrome_normalization_001
+    task: Fix phrase normalization in is_palindrome so all tests pass.
+    expected:
+      tests_pass: true
+      modified_files:
+        - text_tools.py
+
+  - id: inventory_default_001
+    repository: fixtures/inventory_default_001
+    task: Fix missing-SKU handling in quantity_for without changing the tests.
+    expected:
+      tests_pass: true
+      modified_files:
+        - stock.py
+
+  - id: average_empty_001
+    repository: fixtures/average_empty_001
+    task: Fix average so its documented empty-input behavior and all tests pass.
+    expected:
+      tests_pass: true
+      modified_files:
+        - statistics.py
+
+  - id: clamp_return_001
+    repository: fixtures/clamp_return_001
+    task: Fix clamp so it returns the correctly bounded value in every branch.
+    expected:
+      tests_pass: true
+      modified_files:
+        - limits.py
+
+  - id: first_even_001
+    repository: fixtures/first_even_001
+    task: Fix first_even control flow so it examines the input correctly.
+    expected:
+      tests_pass: true
+      modified_files:
+        - parity.py
+
+  - id: active_users_001
+    repository: fixtures/active_users_001
+    task: Fix active_usernames filtering while preserving input order.
+    expected:
+      tests_pass: true
+      modified_files:
+        - users.py
+
+  - id: settings_parser_001
+    repository: fixtures/settings_parser_001
+    task: Fix parse_settings whitespace and empty-input handling so all tests pass.
+    expected:
+      tests_pass: true
+      modified_files:
+        - parser.py
