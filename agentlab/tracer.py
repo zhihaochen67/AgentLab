@@ -91,6 +91,11 @@ def _sanitize(value: Any, *, key: object | None = None) -> Any:
     return summarize_text(value)
 
 
+def sanitize_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return JSON-compatible trace data with secrets redacted."""
+    return {str(key): _sanitize(value, key=key) for key, value in data.items()}
+
+
 class Tracer:
     """Generate a run id and maintain a stable in-memory event sequence."""
 
@@ -121,7 +126,7 @@ class Tracer:
             sequence=self._sequence,
             event_type=event_type,
             timestamp=self._wall_clock().astimezone(timezone.utc).isoformat(),
-            data={str(key): _sanitize(value, key=key) for key, value in data.items()},
+            data=sanitize_data(data),
         )
         self._events.append(event)
         return event
