@@ -18,6 +18,7 @@ def make_result(
     started_at: str = "2026-08-18T01:00:00+00:00",
     finished_at: str = "2026-08-18T01:00:01+00:00",
     error: str | None = None,
+    latency: float = 1.25,
     extra_data: dict | None = None,
     reverse_trace: bool = False,
 ) -> EvalResult:
@@ -41,7 +42,7 @@ def make_result(
             3,
             "run_end",
             finished_at,
-            {"passed": passed, "elapsed_time": 1.25},
+            {"passed": passed, "elapsed_time": latency},
         ),
     )
     if reverse_trace:
@@ -113,6 +114,57 @@ def test_multiple_runs_are_listed_most_recent_first() -> None:
 
         assert [run.run_id for run in storage.list_runs()] == ["newer", "older"]
         assert [run.run_id for run in storage.list_runs(limit=1)] == ["newer"]
+
+
+def test_stats_case_ids_and_run_filters() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-storage-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+
+        empty_stats = storage.get_stats()
+        assert empty_stats.total_runs == 0
+        assert empty_stats.success_rate == 0.0
+        assert empty_stats.average_latency == 0.0
+        assert storage.list_case_ids() == ()
+
+        storage.save_run(
+            make_result("passing", case_id="case-a", latency=2.0),
+            "dataset.yaml",
+        )
+        storage.save_run(
+            make_result("failing", case_id="case-b", passed=False, latency=4.0),
+            "dataset.yaml",
+        )
+
+        stats = storage.get_stats()
+        assert stats.total_runs == 2
+        assert stats.successful_runs == 1
+        assert stats.failed_runs == 1
+        assert stats.success_rate == 50.0
+        assert stats.average_latency == 3.0
+        assert storage.list_case_ids() == ("case-a", "case-b")
+        assert [run.run_id for run in storage.list_runs(status="PASS")] == ["passing"]
+        assert [run.run_id for run in storage.list_runs(status="FAIL")] == ["failing"]
+        assert [run.run_id for run in storage.list_runs(case_id="case-b")] == ["failing"]
+        assert storage.list_runs(status="PASS", case_id="case-b") == ()
+
+        with pytest.raises(ValueError, match="status must be"):
+            storage.list_runs(status="UNKNOWN")
+
+
+def test_read_only_storage_cannot_modify_database() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-storage-") as directory:
+        database = Path(directory) / "agentlab.db"
+        writable = SQLiteStorage(database)
+        writable.save_run(make_result("existing-run"), "dataset.yaml")
+        before = database.read_bytes()
+
+        read_only = SQLiteStorage(database, read_only=True)
+        assert read_only.get_stats().total_runs == 1
+        assert read_only.get_run("existing-run") is not None
+        with pytest.raises(StorageError, match="read-only"):
+            read_only.save_run(make_result("forbidden-run"), "dataset.yaml")
+
+        assert database.read_bytes() == before
 
 
 def test_duplicate_run_id_is_rejected() -> None:

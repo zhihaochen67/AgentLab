@@ -14,7 +14,8 @@ dependencies = [
     "pyyaml",
     "pytest",
     "sqlalchemy",
-    "rich"
+    "rich",
+    "streamlit"
 ]
 
 [project.scripts]
@@ -22,7 +23,7 @@ agentlab = "agentlab.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agentlab*"]
+include = ["agentlab*", "dashboard*"]
 exclude = ["datasets*", "fixtures*", "tests*"]
 
 [tool.pytest.ini_options]
