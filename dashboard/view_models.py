@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from agentlab.replay import event_elapsed, event_status
 from agentlab.storage import StoredRun
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
@@ -20,27 +21,6 @@ def status_label(status: str) -> str:
     if status == "ERROR":
         return "❌ ERROR"
     return status
-
-
-def event_status(event: TraceEvent) -> str:
-    """Derive a compact status from a trace event's structured data."""
-    if event.event_type.startswith("pytest_") and event.event_type.endswith("_end"):
-        if event.data.get("status") == "error":
-            return "ERROR"
-        return "PASS" if event.data.get("passed") else "FAIL"
-    if event.event_type == "agent_end":
-        return "OK" if event.data.get("status") == "ok" else "ERROR"
-    if event.event_type == "run_end":
-        return "PASS" if event.data.get("passed") else "FAIL"
-    if event.event_type == "error":
-        return "ERROR"
-    return ""
-
-
-def event_elapsed(event: TraceEvent) -> float | None:
-    """Return event latency when the event contains a numeric duration."""
-    elapsed = event.data.get("elapsed_time")
-    return float(elapsed) if isinstance(elapsed, (int, float)) else None
 
 
 def run_table_rows(runs: Iterable[StoredRun]) -> list[dict[str, Any]]:

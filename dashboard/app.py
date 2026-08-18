@@ -7,6 +7,13 @@ from pathlib import Path
 
 import streamlit as st
 
+from agentlab.replay import (
+    ReplayEventView,
+    ReplayState,
+    ReplayTrace,
+    format_replay_event,
+    prepare_replay,
+)
 from agentlab.storage import (
     RunStats,
     RunStorage,
@@ -31,7 +38,7 @@ LONG_TEXT_FIELDS = {"stdout", "stderr"}
 
 
 def render_status(status: str) -> None:
-    css_class = "status-pass" if status == "PASS" else "status-fail"
+    css_class = "status-pass" if status in {"PASS", "OK"} else "status-fail"
     st.markdown(
         f'<span class="status-pill {css_class}">{status}</span>',
         unsafe_allow_html=True,
@@ -154,6 +161,100 @@ def render_detail_selector(storage: RunStorage) -> None:
     render_run_detail(storage, selected.run_id)
 
 
+def render_replay_event(event: ReplayEventView) -> None:
+    st.subheader(f"{event.sequence} · {event.event_type}")
+    summary = st.columns(3)
+    summary[0].write("**Timestamp**")
+    summary[0].write(event.timestamp)
+    summary[1].write("**Status**")
+    if event.status:
+        with summary[1]:
+            render_status(event.status)
+    else:
+        summary[1].write("—")
+    summary[2].write("**Elapsed**")
+    summary[2].write(f"{event.elapsed:.3f}s" if event.elapsed is not None else "—")
+
+    regular = {
+        key: value
+        for key, value in event.highlights.items()
+        if key not in LONG_TEXT_FIELDS
+    }
+    if regular:
+        st.json(regular)
+    for key in LONG_TEXT_FIELDS:
+        value = event.highlights.get(key)
+        if value:
+            with st.expander(f"{key} summary", expanded=False):
+                st.text(str(value))
+
+    with st.expander("Sanitized event data", expanded=False):
+        event_regular = {
+            key: value for key, value in event.data.items() if key not in LONG_TEXT_FIELDS
+        }
+        if event_regular:
+            st.json(event_regular)
+        for key in LONG_TEXT_FIELDS:
+            value = event.data.get(key)
+            if value:
+                st.text_area(
+                    key,
+                    value=str(value),
+                    height=160,
+                    disabled=True,
+                    key=f"replay-{event.sequence}-{key}",
+                )
+        if not event.data:
+            st.caption("No event data.")
+
+
+def replay_cursor(storage_key: str, trace: ReplayTrace) -> ReplayState:
+    """Read a replay cursor from UI state and clamp it to the prepared trace."""
+    raw_index = st.session_state.get(storage_key, 0)
+    index = raw_index if isinstance(raw_index, int) else 0
+    return ReplayState(trace, index)
+
+
+def render_replay(storage: RunStorage) -> None:
+    st.header("Historical Replay")
+    st.info("No side effects are re-executed. This view only reads persisted history.")
+
+    runs = storage.list_runs(limit=DASHBOARD_RUN_LIMIT)
+    selected = st.selectbox(
+        "Historical run",
+        runs,
+        format_func=run_option,
+        key="replay_selected_run",
+    )
+    st.code(run_detail_data(selected)["run_id"], language=None)
+
+    trace = prepare_replay(storage.get_trace_events(selected.run_id))
+    for warning in trace.warnings:
+        st.warning(f"Trace integrity: {warning}")
+    if not trace.events:
+        st.info("This run has no replayable trace events.")
+        return
+
+    cursor_key = f"replay_index_{selected.run_id}"
+    state = replay_cursor(cursor_key, trace)
+    controls = st.columns(4)
+    if controls[0].button("First", disabled=state.is_first, width="stretch"):
+        state = state.first()
+    if controls[1].button("Previous", disabled=state.is_first, width="stretch"):
+        state = state.previous()
+    if controls[2].button("Next", disabled=state.is_last, width="stretch"):
+        state = state.next()
+    if controls[3].button("Last", disabled=state.is_last, width="stretch"):
+        state = state.last()
+    st.session_state[cursor_key] = state.index
+
+    st.write(f"**Step {state.current_step} / {state.total_steps}**")
+    st.progress(state.current_step / state.total_steps)
+    current = state.current_event
+    if current is not None:
+        render_replay_event(format_replay_event(current))
+
+
 def render_missing_database(path: Path) -> None:
     st.header("AgentLab Dashboard")
     st.info("No AgentLab database found. Run an evaluation to create the first run.")
@@ -189,14 +290,18 @@ def main() -> None:
             st.info("No evaluation runs yet.")
             return
 
-        view = st.sidebar.radio("View", ("Overview", "Runs", "Run Detail"))
+        view = st.sidebar.radio(
+            "View", ("Overview", "Runs", "Run Detail", "Replay")
+        )
         st.sidebar.caption(f"Database: {database_path}")
         if view == "Overview":
             render_overview(storage, stats)
         elif view == "Runs":
             render_runs(storage)
-        else:
+        elif view == "Run Detail":
             render_detail_selector(storage)
+        else:
+            render_replay(storage)
     except (StorageError, ValueError) as error:
         st.error(f"Could not load AgentLab data: {error}")
 
