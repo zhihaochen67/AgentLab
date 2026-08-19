@@ -74,6 +74,9 @@ def experiment_table_rows(experiments: Iterable[Experiment]) -> list[dict[str, A
         {
             "experiment_id": summarize_text(experiment.experiment_id),
             "label": summarize_text(experiment.label),
+            "agent_version": _metadata_for_display(experiment.agent_version),
+            "prompt_variant": _metadata_for_display(experiment.prompt_variant),
+            "model": _metadata_for_display(experiment.model),
             "status": experiment.status.upper(),
             "runs": experiment.total_runs,
             "trials_per_case": experiment.trials_per_case,
@@ -93,11 +96,10 @@ def experiment_detail_data(
         "label": summarize_text(experiment.label),
         "dataset": summarize_text(experiment.dataset),
         "adapter": summarize_text(experiment.adapter),
-        "model": (
-            summarize_text(experiment.model)
-            if experiment.model is not None
-            else "Not recorded"
-        ),
+        "agent_version": _metadata_for_display(experiment.agent_version),
+        "prompt_variant": _metadata_for_display(experiment.prompt_variant),
+        "model": _metadata_for_display(experiment.model),
+        "notes": _metadata_for_display(experiment.notes),
         "trials_per_case": experiment.trials_per_case,
         "total_cases": experiment.total_cases,
         "total_runs": metrics.total_runs,
@@ -160,6 +162,13 @@ def comparison_view_data(comparison: ExperimentComparison) -> dict[str, Any]:
         "baseline": {
             "experiment_id": summarize_text(baseline.experiment.experiment_id),
             "label": summarize_text(baseline.experiment.label),
+            "agent_version": _metadata_for_display(
+                baseline.experiment.agent_version
+            ),
+            "prompt_variant": _metadata_for_display(
+                baseline.experiment.prompt_variant
+            ),
+            "model": _metadata_for_display(baseline.experiment.model),
             "total_runs": baseline.total_runs,
             "passed_runs": baseline.passed_runs,
             "failed_runs": baseline.failed_runs,
@@ -169,6 +178,13 @@ def comparison_view_data(comparison: ExperimentComparison) -> dict[str, Any]:
         "candidate": {
             "experiment_id": summarize_text(candidate.experiment.experiment_id),
             "label": summarize_text(candidate.experiment.label),
+            "agent_version": _metadata_for_display(
+                candidate.experiment.agent_version
+            ),
+            "prompt_variant": _metadata_for_display(
+                candidate.experiment.prompt_variant
+            ),
+            "model": _metadata_for_display(candidate.experiment.model),
             "total_runs": candidate.total_runs,
             "passed_runs": candidate.passed_runs,
             "failed_runs": candidate.failed_runs,
@@ -336,3 +352,7 @@ def _boolean_label(value: Any) -> str:
     if value is False:
         return "NO"
     return "NOT AVAILABLE"
+
+
+def _metadata_for_display(value: str | None) -> str:
+    return summarize_text(value) if value is not None else "Not recorded"

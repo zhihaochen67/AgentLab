@@ -22,19 +22,24 @@ def make_experiment(
     trials: int = 3,
     total_cases: int = 2,
     status: str = "completed_with_failures",
+    agent_version: str | None = None,
+    prompt_variant: str | None = None,
+    model: str | None = "fake-model",
 ) -> Experiment:
     return Experiment(
         experiment_id=experiment_id,
         label=f"{experiment_id}-label",
         dataset=dataset,
         adapter="FakeAdapter",
-        model="fake-model",
+        model=model,
         trials_per_case=trials,
         total_cases=total_cases,
         total_runs=0,
         started_at="2026-08-19T01:00:00+00:00",
         finished_at="2026-08-19T01:01:00+00:00",
         status=status,
+        agent_version=agent_version,
+        prompt_variant=prompt_variant,
     )
 
 
@@ -73,8 +78,20 @@ def make_metrics(
 
 
 def make_mixed_comparison():
-    baseline = make_experiment("baseline", trials=2)
-    candidate = make_experiment("candidate", trials=2)
+    baseline = make_experiment(
+        "baseline",
+        trials=2,
+        agent_version="repo-doctor-0.2.0",
+        prompt_variant="baseline-v1",
+        model="deepseek-v4-flash",
+    )
+    candidate = make_experiment(
+        "candidate",
+        trials=2,
+        agent_version="repo-doctor-0.2.0",
+        prompt_variant="candidate-v2",
+        model="deepseek-v4-flash",
+    )
     baseline_metrics = make_metrics(
         "baseline",
         {"case-a": (2, 1, 12.0), "case-b": (2, 2, 8.0)},
@@ -249,6 +266,10 @@ def test_dashboard_comparison_view_model_has_changes_and_taxonomy() -> None:
 
     assert data["is_equivalent"] is True
     assert data["baseline"]["total_runs"] == 4
+    assert data["baseline"]["agent_version"] == "repo-doctor-0.2.0"
+    assert data["baseline"]["prompt_variant"] == "baseline-v1"
+    assert data["baseline"]["model"] == "deepseek-v4-flash"
+    assert data["candidate"]["prompt_variant"] == "candidate-v2"
     assert data["candidate"]["average_latency"] == 6.0
     assert data["latency_delta"] == -4.0
     assert [row["case_id"] for row in data["improvements"]] == ["case-a"]
@@ -281,6 +302,8 @@ def test_cli_comparison_formatting(monkeypatch) -> None:
     assert "Experiment Comparison" in result.stdout
     assert "Baseline:" in result.stdout
     assert "Candidate:" in result.stdout
+    assert "repo-doctor-0.2.0 / baseline-v1 / deepseek-v4-flash" in result.stdout
+    assert "repo-doctor-0.2.0 / candidate-v2 / deepseek-v4-flash" in result.stdout
     assert "Success Rate" in result.stdout
     assert "Avg Latency" in result.stdout
     assert "case-a" in result.stdout

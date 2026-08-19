@@ -216,6 +216,8 @@ def render_experiments(storage: RunStorage) -> None:
         st.write("**Label:**", detail["label"])
         st.write("**Dataset:**", detail["dataset"])
         st.write("**Adapter:**", detail["adapter"])
+        st.write("**Agent version:**", detail["agent_version"])
+        st.write("**Prompt variant:**", detail["prompt_variant"])
         st.write("**Model:**", detail["model"])
         st.write("**Status:**", detail["status"])
     with second:
@@ -223,6 +225,7 @@ def render_experiments(storage: RunStorage) -> None:
         st.write("**Total cases:**", detail["total_cases"])
         st.write("**Started:**", detail["started_at"])
         st.write("**Finished:**", detail["finished_at"])
+        st.write("**Notes:**", detail["notes"])
 
     metrics_columns = st.columns(5)
     metrics_columns[0].metric("Total Runs", detail["total_runs"])
@@ -280,9 +283,27 @@ def render_comparison(storage: RunStorage) -> None:
         f"**Baseline:** {data['baseline']['label']} "
         f"(`{data['baseline']['experiment_id']}`)"
     )
+    st.caption(
+        " / ".join(
+            (
+                data["baseline"]["agent_version"],
+                data["baseline"]["prompt_variant"],
+                data["baseline"]["model"],
+            )
+        )
+    )
     st.write(
         f"**Candidate:** {data['candidate']['label']} "
         f"(`{data['candidate']['experiment_id']}`)"
+    )
+    st.caption(
+        " / ".join(
+            (
+                data["candidate"]["agent_version"],
+                data["candidate"]["prompt_variant"],
+                data["candidate"]["model"],
+            )
+        )
     )
     if data["is_equivalent"]:
         st.success("Equivalent comparison")

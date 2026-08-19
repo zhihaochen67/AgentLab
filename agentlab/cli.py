@@ -169,6 +169,30 @@ def run_experiment_command(
         str | None,
         typer.Option("--label", help="Human-readable label."),
     ] = None,
+    agent_version: Annotated[
+        str | None,
+        typer.Option(
+            "--agent-version",
+            help=(
+                "Agent implementation version recorded as metadata; this does not "
+                "change the Repo Doctor executable."
+            ),
+        ),
+    ] = None,
+    prompt_variant: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-variant",
+            help=(
+                "Prompt variant identifier recorded as metadata; current Repo Doctor "
+                "does not expose prompt selection."
+            ),
+        ),
+    ] = None,
+    notes: Annotated[
+        str | None,
+        typer.Option("--notes", help="Optional experiment notes."),
+    ] = None,
     case_ids: Annotated[
         list[str] | None,
         typer.Option(
@@ -188,6 +212,9 @@ def run_experiment_command(
             adapter=RepoDoctorAdapter(),
             trials_per_case=trials,
             label=label,
+            agent_version=agent_version,
+            prompt_variant=prompt_variant,
+            notes=notes,
             case_ids=case_ids,
         )
     except ExperimentPreflightError as error:
@@ -212,23 +239,29 @@ def show_recent_experiments():
     if not experiments:
         console.print("No experiments yet.")
         return
-    table = Table(box=None, pad_edge=False)
-    table.add_column("Experiment ID", no_wrap=True)
-    table.add_column("Label")
-    table.add_column("Status")
-    table.add_column("Runs", justify="right")
-    table.add_column("Trials/Case", justify="right")
-    table.add_column("Started")
-    for experiment in experiments:
-        table.add_row(
-            experiment.experiment_id,
-            experiment.label,
-            _experiment_status_markup(experiment.status),
-            str(experiment.total_runs),
-            str(experiment.trials_per_case),
-            experiment.started_at,
+    console.print("[bold cyan]Experiments[/bold cyan]")
+    for index, experiment in enumerate(experiments):
+        if index:
+            console.print()
+        console.print(f"[bold]Experiment:[/bold] {experiment.experiment_id}")
+        console.print(f"[bold]Label:[/bold] {experiment.label}")
+        console.print(
+            f"[bold]Agent Version:[/bold] "
+            f"{_metadata_value(experiment.agent_version)}"
         )
-    console.print(table)
+        console.print(
+            f"[bold]Prompt Variant:[/bold] "
+            f"{_metadata_value(experiment.prompt_variant)}"
+        )
+        console.print(f"[bold]Model:[/bold] {_metadata_value(experiment.model)}")
+        console.print(
+            f"[bold]Status:[/bold] {_experiment_status_markup(experiment.status)}"
+        )
+        console.print(f"[bold]Runs:[/bold] {experiment.total_runs}")
+        console.print(
+            f"[bold]Trials per case:[/bold] {experiment.trials_per_case}"
+        )
+        console.print(f"[bold]Started:[/bold] {experiment.started_at}")
 
 
 @app.command("experiment-show")
@@ -271,7 +304,10 @@ def _render_experiment(
     console.print(f"[bold]Label:[/bold] {experiment.label}")
     console.print(f"[bold]Dataset:[/bold] {experiment.dataset}")
     console.print(f"[bold]Adapter:[/bold] {experiment.adapter}")
-    console.print(f"[bold]Model:[/bold] {experiment.model or 'not recorded'}")
+    console.print(f"[bold]Agent Version:[/bold] {_metadata_value(experiment.agent_version)}")
+    console.print(f"[bold]Prompt Variant:[/bold] {_metadata_value(experiment.prompt_variant)}")
+    console.print(f"[bold]Model:[/bold] {_metadata_value(experiment.model)}")
+    console.print(f"[bold]Notes:[/bold] {_metadata_value(experiment.notes)}")
     console.print(
         f"[bold]Status:[/bold] {_experiment_status_markup(experiment.status)}"
     )
@@ -322,10 +358,12 @@ def _render_experiment_comparison(comparison: ExperimentComparison) -> None:
         f"[bold]Baseline:[/bold] {baseline.experiment.label} "
         f"({baseline.experiment.experiment_id})"
     )
+    console.print(f"  {_experiment_variant_label(baseline.experiment)}")
     console.print(
         f"[bold]Candidate:[/bold] {candidate.experiment.label} "
         f"({candidate.experiment.experiment_id})"
     )
+    console.print(f"  {_experiment_variant_label(candidate.experiment)}")
     if comparison.compatibility.is_equivalent:
         console.print("[bold]Compatibility:[/bold] [green]EQUIVALENT[/green]")
     else:
@@ -446,6 +484,20 @@ def _format_count_delta(delta: int) -> str:
 
 def _format_rate_delta(delta: float) -> str:
     return f"{delta:+.1f} pp"
+
+
+def _metadata_value(value: str | None) -> str:
+    return value or "not recorded"
+
+
+def _experiment_variant_label(experiment: Experiment) -> str:
+    return " / ".join(
+        (
+            _metadata_value(experiment.agent_version),
+            _metadata_value(experiment.prompt_variant),
+            _metadata_value(experiment.model),
+        )
+    )
 
 
 def _experiment_status_markup(status: str) -> str:

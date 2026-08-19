@@ -171,6 +171,9 @@ class SQLiteStorage(RunStorage):
                     dataset TEXT NOT NULL,
                     adapter TEXT NOT NULL,
                     model TEXT,
+                    agent_version TEXT,
+                    prompt_variant TEXT,
+                    notes TEXT,
                     trials_per_case INTEGER NOT NULL CHECK (trials_per_case > 0),
                     total_cases INTEGER NOT NULL CHECK (total_cases >= 0),
                     total_runs INTEGER NOT NULL DEFAULT 0 CHECK (total_runs >= 0),
@@ -217,6 +220,7 @@ class SQLiteStorage(RunStorage):
                     ON trace_events(run_id, sequence);
                 """
             )
+            self._migrate_experiments_schema(connection)
             self._migrate_runs_schema(connection)
             connection.execute(
                 """
@@ -224,6 +228,16 @@ class SQLiteStorage(RunStorage):
                     ON runs(experiment_id, case_id, trial_index)
                 """
             )
+
+    @staticmethod
+    def _migrate_experiments_schema(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(experiments)").fetchall()
+        }
+        for column in ("agent_version", "prompt_variant", "notes"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE experiments ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_runs_schema(connection: sqlite3.Connection) -> None:
@@ -480,6 +494,17 @@ class SQLiteStorage(RunStorage):
             summarize_text(experiment.dataset),
             summarize_text(experiment.adapter),
             summarize_text(experiment.model) if experiment.model is not None else None,
+            (
+                summarize_text(experiment.agent_version)
+                if experiment.agent_version is not None
+                else None
+            ),
+            (
+                summarize_text(experiment.prompt_variant)
+                if experiment.prompt_variant is not None
+                else None
+            ),
+            summarize_text(experiment.notes) if experiment.notes is not None else None,
             experiment.trials_per_case,
             experiment.total_cases,
             experiment.total_runs,
@@ -497,9 +522,10 @@ class SQLiteStorage(RunStorage):
                     """
                     INSERT INTO experiments (
                         experiment_id, label, dataset, adapter, model,
+                        agent_version, prompt_variant, notes,
                         trials_per_case, total_cases, total_runs,
                         started_at, finished_at, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -677,6 +703,7 @@ class SQLiteStorage(RunStorage):
 
     @staticmethod
     def _experiment(row: sqlite3.Row) -> Experiment:
+        columns = set(row.keys())
         return Experiment(
             experiment_id=row["experiment_id"],
             label=row["label"],
@@ -689,4 +716,11 @@ class SQLiteStorage(RunStorage):
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             status=row["status"],
+            agent_version=(
+                row["agent_version"] if "agent_version" in columns else None
+            ),
+            prompt_variant=(
+                row["prompt_variant"] if "prompt_variant" in columns else None
+            ),
+            notes=row["notes"] if "notes" in columns else None,
         )

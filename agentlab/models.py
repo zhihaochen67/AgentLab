@@ -43,6 +43,9 @@ class Experiment:
     started_at: str
     finished_at: str | None
     status: str
+    agent_version: str | None = None
+    prompt_variant: str | None = None
+    notes: str | None = None
 
 
 @dataclass(frozen=True)

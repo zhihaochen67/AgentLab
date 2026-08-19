@@ -84,6 +84,9 @@ def run_experiment(
     adapter: AgentAdapter,
     trials_per_case: int,
     label: str | None = None,
+    agent_version: str | None = None,
+    prompt_variant: str | None = None,
+    notes: str | None = None,
     case_ids: Sequence[str] | None = None,
     evaluator: ExperimentEvaluator | None = None,
     validator: DatasetValidator = validate_dataset,
@@ -103,6 +106,9 @@ def run_experiment(
     experiment_label = (label or Path(dataset).stem).strip()
     if not experiment_label:
         raise ValueError("Experiment label must be non-empty.")
+    recorded_agent_version = _optional_metadata(agent_version)
+    recorded_prompt_variant = _optional_metadata(prompt_variant)
+    recorded_notes = _optional_metadata(notes)
 
     try:
         preflight = adapter.preflight()
@@ -119,6 +125,9 @@ def run_experiment(
             started_at=started_at,
             finished_at=_timestamp(active_clock),
             status="aborted",
+            agent_version=recorded_agent_version,
+            prompt_variant=recorded_prompt_variant,
+            notes=recorded_notes,
         )
         storage.create_experiment(aborted)
         raise ExperimentPreflightError(
@@ -139,6 +148,9 @@ def run_experiment(
         started_at=started_at,
         finished_at=None,
         status="running",
+        agent_version=recorded_agent_version,
+        prompt_variant=recorded_prompt_variant,
+        notes=recorded_notes,
     )
     storage.create_experiment(running)
     execute = evaluator or _evaluate
@@ -169,3 +181,10 @@ def _evaluate(case: EvalCase, adapter: AgentAdapter) -> EvalResult:
 
 def _timestamp(clock: Clock) -> str:
     return clock().astimezone(timezone.utc).isoformat()
+
+
+def _optional_metadata(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None

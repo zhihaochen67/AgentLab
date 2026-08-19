@@ -141,6 +141,45 @@ def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> No
         assert secret.encode() not in database.read_bytes()
 
 
+def test_cli_experiment_records_explicit_variant_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
+    with tempfile.TemporaryDirectory(prefix="agentlab-cli-variant-") as directory:
+        database = Path(directory) / "agentlab.db"
+        monkeypatch.setenv("AGENTLAB_DB_PATH", str(database))
+        monkeypatch.setattr(
+            "agentlab.cli.load_dataset",
+            lambda _dataset, **_kwargs: [EvalCase("case-a", "unused", "Fix A")],
+        )
+        monkeypatch.setattr(
+            "agentlab.experiments.evaluate_case",
+            lambda *_args, **_kwargs: pytest.fail("evaluation must not run"),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "experiment",
+                "dataset.yaml",
+                "--agent-version",
+                "repo-doctor-0.2.0",
+                "--prompt-variant",
+                "candidate-v2",
+                "--notes",
+                "candidate prompt trial",
+            ],
+        )
+        experiments = SQLiteStorage(database).list_experiments()
+
+        assert result.exit_code == 1
+        assert len(experiments) == 1
+        assert experiments[0].agent_version == "repo-doctor-0.2.0"
+        assert experiments[0].prompt_variant == "candidate-v2"
+        assert experiments[0].notes == "candidate prompt trial"
+        assert experiments[0].total_runs == 0
+
+
 def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-cli-experiment-") as directory:
         database = Path(directory) / "agentlab.db"
@@ -157,6 +196,9 @@ def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
             started_at="2026-08-19T01:00:00+00:00",
             finished_at=None,
             status="running",
+            agent_version="repo-doctor-0.2.0",
+            prompt_variant="baseline-v1",
+            notes="official baseline",
         )
         storage.create_experiment(experiment)
         repository = Path(directory) / "repository"
@@ -190,7 +232,16 @@ def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
         assert listed.exit_code == 0
         assert "experiment-cli" in listed.stdout
         assert "CLI baseline" in listed.stdout
+        assert "repo-doctor-0.2.0" in listed.stdout
+        assert "baseline-v1" in listed.stdout
+        assert "not recorded" in listed.stdout
         assert shown.exit_code == 0
+        assert "Agent Version:" in shown.stdout
+        assert "repo-doctor-0.2.0" in shown.stdout
+        assert "Prompt Variant:" in shown.stdout
+        assert "baseline-v1" in shown.stdout
+        assert "Notes:" in shown.stdout
+        assert "official baseline" in shown.stdout
         assert "Success Rate:" in shown.stdout
         assert "100.0%" in shown.stdout
         assert "addition" in shown.stdout

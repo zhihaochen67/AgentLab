@@ -202,6 +202,9 @@ def test_dashboard_experiment_view_models_are_aggregated_and_redacted(monkeypatc
         started_at="2026-08-19T01:00:00+00:00",
         finished_at="2026-08-19T01:01:00+00:00",
         status="completed_with_failures",
+        agent_version="repo-doctor-0.2.0",
+        prompt_variant="baseline-v1",
+        notes="official baseline",
     )
     metrics = ExperimentMetrics(
         experiment_id="experiment-one",
@@ -231,6 +234,13 @@ def test_dashboard_experiment_view_models_are_aggregated_and_redacted(monkeypatc
     assert secret not in repr(table)
     assert secret not in repr(detail)
     assert "[REDACTED]" in table[0]["label"]
+    assert table[0]["agent_version"] == "repo-doctor-0.2.0"
+    assert table[0]["prompt_variant"] == "baseline-v1"
+    assert table[0]["model"] == "deepseek-chat"
+    assert detail["agent_version"] == "repo-doctor-0.2.0"
+    assert detail["prompt_variant"] == "baseline-v1"
+    assert detail["model"] == "deepseek-chat"
+    assert detail["notes"] == "official baseline"
     assert detail["total_runs"] == 3
     assert detail["success_rate"] == 200 / 3
     assert cases == [
@@ -244,3 +254,39 @@ def test_dashboard_experiment_view_models_are_aggregated_and_redacted(monkeypatc
         }
     ]
     assert failures == [{"failure_type": "repair_verification_failed", "count": 1}]
+
+
+def test_dashboard_legacy_experiment_metadata_is_rendered_as_not_recorded() -> None:
+    experiment = Experiment(
+        experiment_id="legacy-experiment",
+        label="legacy",
+        dataset="dataset.yaml",
+        adapter="RepoDoctorAdapter",
+        model=None,
+        trials_per_case=3,
+        total_cases=0,
+        total_runs=0,
+        started_at="2026-08-19T01:00:00+00:00",
+        finished_at="2026-08-19T01:01:00+00:00",
+        status="completed",
+    )
+    metrics = ExperimentMetrics(
+        experiment_id="legacy-experiment",
+        total_runs=0,
+        passed_runs=0,
+        failed_runs=0,
+        success_rate=0.0,
+        average_latency=0.0,
+        per_case=(),
+        failure_types=(),
+    )
+
+    table = experiment_table_rows((experiment,))
+    detail = experiment_detail_data(experiment, metrics)
+
+    assert table[0]["agent_version"] == "Not recorded"
+    assert table[0]["prompt_variant"] == "Not recorded"
+    assert table[0]["model"] == "Not recorded"
+    assert detail["agent_version"] == "Not recorded"
+    assert detail["prompt_variant"] == "Not recorded"
+    assert detail["notes"] == "Not recorded"

@@ -143,6 +143,9 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
             adapter=FakeExperimentAdapter(),
             trials_per_case=2,
             label="two-case-baseline",
+            agent_version="repo-doctor-0.2.0",
+            prompt_variant="baseline-v1",
+            notes="repeated-trial baseline",
             case_ids=("case-c", "case-a", "case-a"),
             evaluator=evaluator,
             validator=lambda _cases: None,
@@ -158,6 +161,9 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
         assert experiment is not None
         assert experiment.label == "two-case-baseline"
         assert experiment.model == "fake-model"
+        assert experiment.agent_version == "repo-doctor-0.2.0"
+        assert experiment.prompt_variant == "baseline-v1"
+        assert experiment.notes == "repeated-trial baseline"
         assert experiment.total_cases == 2
         assert experiment.total_runs == 4
         assert experiment.status == "completed_with_failures"
