@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from agentlab.tracer import TraceEvent
@@ -69,3 +69,72 @@ class ExperimentMetrics:
     average_latency: float
     per_case: tuple[CaseExperimentMetrics, ...]
     failure_types: tuple[tuple[str, int], ...]
+
+
+ComparisonChange = Literal["improved", "regressed", "unchanged"]
+
+
+@dataclass(frozen=True)
+class ExperimentComparisonSummary:
+    """One side of an experiment comparison."""
+
+    experiment: Experiment
+    total_runs: int
+    passed_runs: int
+    failed_runs: int
+    success_rate: float
+    average_latency: float
+
+
+@dataclass(frozen=True)
+class ComparisonCompatibility:
+    """Compatibility verdict and the evidence used to produce it."""
+
+    is_equivalent: bool
+    dataset_matches: bool
+    case_sets_match: bool
+    trials_per_case_matches: bool
+    baseline_case_set_complete: bool
+    candidate_case_set_complete: bool
+    common_case_ids: tuple[str, ...]
+    baseline_only_case_ids: tuple[str, ...]
+    candidate_only_case_ids: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CaseExperimentComparison:
+    """Success-rate comparison for one case observed on both sides."""
+
+    case_id: str
+    baseline_runs: int
+    baseline_passes: int
+    baseline_success_rate: float
+    candidate_runs: int
+    candidate_passes: int
+    candidate_success_rate: float
+    delta: float
+    change: ComparisonChange
+
+
+@dataclass(frozen=True)
+class FailureTypeComparison:
+    """Failure taxonomy count comparison for one failure type."""
+
+    failure_type: str
+    baseline_count: int
+    candidate_count: int
+    delta: int
+
+
+@dataclass(frozen=True)
+class ExperimentComparison:
+    """Pure comparison result built from two persisted experiments."""
+
+    baseline: ExperimentComparisonSummary
+    candidate: ExperimentComparisonSummary
+    success_rate_delta: float
+    latency_delta: float
+    compatibility: ComparisonCompatibility
+    per_case: tuple[CaseExperimentComparison, ...]
+    failure_types: tuple[FailureTypeComparison, ...]

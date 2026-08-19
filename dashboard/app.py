@@ -7,6 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from agentlab.comparison import compare_experiments
 from agentlab.replay import (
     ReplayEventView,
     ReplayState,
@@ -24,6 +25,8 @@ from agentlab.storage import (
 )
 from agentlab.tracer import TraceEvent
 from dashboard.view_models import (
+    comparison_overall_rows,
+    comparison_view_data,
     event_data_for_display,
     event_status,
     experiment_case_rows,
@@ -245,6 +248,94 @@ def render_experiments(storage: RunStorage) -> None:
         st.caption("No failures recorded.")
 
 
+def render_comparison(storage: RunStorage) -> None:
+    st.header("Experiment Comparison")
+    experiments = storage.list_experiments(limit=DASHBOARD_RUN_LIMIT)
+    if not experiments:
+        st.info("No experiments available for comparison.")
+        return
+
+    selectors = st.columns(2)
+    baseline = selectors[0].selectbox(
+        "Baseline",
+        experiments,
+        format_func=experiment_option,
+        key="comparison_baseline",
+    )
+    candidate = selectors[1].selectbox(
+        "Candidate",
+        experiments,
+        index=1 if len(experiments) > 1 else 0,
+        format_func=experiment_option,
+        key="comparison_candidate",
+    )
+    comparison = compare_experiments(
+        storage,
+        baseline.experiment_id,
+        candidate.experiment_id,
+    )
+    data = comparison_view_data(comparison)
+
+    st.write(
+        f"**Baseline:** {data['baseline']['label']} "
+        f"(`{data['baseline']['experiment_id']}`)"
+    )
+    st.write(
+        f"**Candidate:** {data['candidate']['label']} "
+        f"(`{data['candidate']['experiment_id']}`)"
+    )
+    if data["is_equivalent"]:
+        st.success("Equivalent comparison")
+    else:
+        warning_text = "\n".join(f"- {warning}" for warning in data["warnings"])
+        st.warning(f"Non-equivalent comparison\n\n{warning_text}")
+
+    st.subheader("Overall")
+    kpis = st.columns(2)
+    kpis[0].metric(
+        "Candidate Success Rate",
+        f"{data['candidate']['success_rate']:.1f}%",
+        f"{data['success_rate_delta']:+.1f} pp vs baseline",
+    )
+    kpis[1].metric(
+        "Candidate Average Latency",
+        f"{data['candidate']['average_latency']:.3f}s",
+        f"{data['latency_delta']:+.3f}s vs baseline",
+        delta_color="inverse",
+    )
+    st.dataframe(
+        comparison_overall_rows(comparison),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("Per-Case Results (Common Cases)")
+    if data["per_case"]:
+        st.dataframe(data["per_case"], width="stretch", hide_index=True)
+    else:
+        st.caption("No common executed cases.")
+
+    changes = st.columns(2)
+    with changes[0]:
+        st.subheader("Improvements")
+        if data["improvements"]:
+            st.dataframe(data["improvements"], width="stretch", hide_index=True)
+        else:
+            st.caption("None")
+    with changes[1]:
+        st.subheader("Regressions")
+        if data["regressions"]:
+            st.dataframe(data["regressions"], width="stretch", hide_index=True)
+        else:
+            st.caption("None")
+
+    st.subheader("Failure Type Comparison")
+    if data["failure_types"]:
+        st.dataframe(data["failure_types"], width="stretch", hide_index=True)
+    else:
+        st.caption("No failures recorded.")
+
+
 def render_replay_event(event: ReplayEventView) -> None:
     st.subheader(f"{event.sequence} · {event.event_type}")
     summary = st.columns(3)
@@ -426,7 +517,15 @@ def main() -> None:
             return
 
         view = st.sidebar.radio(
-            "View", ("Overview", "Runs", "Run Detail", "Replay", "Experiments")
+            "View",
+            (
+                "Overview",
+                "Runs",
+                "Run Detail",
+                "Replay",
+                "Experiments",
+                "Comparison",
+            ),
         )
         st.sidebar.caption(f"Database: {database_path}")
         if view == "Overview":
@@ -437,8 +536,10 @@ def main() -> None:
             render_detail_selector(storage)
         elif view == "Replay":
             render_replay(storage)
-        else:
+        elif view == "Experiments":
             render_experiments(storage)
+        else:
+            render_comparison(storage)
     except (StorageError, ValueError) as error:
         st.error(f"Could not load AgentLab data: {error}")
 

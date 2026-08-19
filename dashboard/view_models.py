@@ -6,7 +6,14 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from agentlab.diagnostics import diagnostics_from_trace_data
-from agentlab.models import CaseExperimentMetrics, Experiment, ExperimentMetrics
+from agentlab.models import (
+    CaseExperimentComparison,
+    CaseExperimentMetrics,
+    Experiment,
+    ExperimentComparison,
+    ExperimentMetrics,
+    FailureTypeComparison,
+)
 from agentlab.replay import event_elapsed, event_status
 from agentlab.storage import StoredRun
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
@@ -132,6 +139,125 @@ def experiment_failure_rows(
     return [
         {"failure_type": summarize_text(failure_type), "count": count}
         for failure_type, count in failure_types
+    ]
+
+
+def comparison_view_data(comparison: ExperimentComparison) -> dict[str, Any]:
+    """Create a sanitized, UI-ready experiment comparison view model."""
+    baseline = comparison.baseline
+    candidate = comparison.candidate
+    return {
+        "is_equivalent": comparison.compatibility.is_equivalent,
+        "comparison_label": (
+            "EQUIVALENT"
+            if comparison.compatibility.is_equivalent
+            else "NON-EQUIVALENT COMPARISON"
+        ),
+        "warnings": [
+            summarize_text(warning)
+            for warning in comparison.compatibility.warnings
+        ],
+        "baseline": {
+            "experiment_id": summarize_text(baseline.experiment.experiment_id),
+            "label": summarize_text(baseline.experiment.label),
+            "total_runs": baseline.total_runs,
+            "passed_runs": baseline.passed_runs,
+            "failed_runs": baseline.failed_runs,
+            "success_rate": round(baseline.success_rate, 1),
+            "average_latency": round(baseline.average_latency, 3),
+        },
+        "candidate": {
+            "experiment_id": summarize_text(candidate.experiment.experiment_id),
+            "label": summarize_text(candidate.experiment.label),
+            "total_runs": candidate.total_runs,
+            "passed_runs": candidate.passed_runs,
+            "failed_runs": candidate.failed_runs,
+            "success_rate": round(candidate.success_rate, 1),
+            "average_latency": round(candidate.average_latency, 3),
+        },
+        "success_rate_delta": round(comparison.success_rate_delta, 1),
+        "latency_delta": round(comparison.latency_delta, 3),
+        "per_case": comparison_case_rows(comparison.per_case),
+        "improvements": comparison_case_rows(
+            case for case in comparison.per_case if case.change == "improved"
+        ),
+        "regressions": comparison_case_rows(
+            case for case in comparison.per_case if case.change == "regressed"
+        ),
+        "failure_types": comparison_failure_rows(comparison.failure_types),
+    }
+
+
+def comparison_overall_rows(comparison: ExperimentComparison) -> list[dict[str, Any]]:
+    """Convert overall comparison KPIs into a compact display table."""
+    baseline = comparison.baseline
+    candidate = comparison.candidate
+    return [
+        {
+            "metric": "Total Runs",
+            "baseline": baseline.total_runs,
+            "candidate": candidate.total_runs,
+            "delta": candidate.total_runs - baseline.total_runs,
+        },
+        {
+            "metric": "Passed",
+            "baseline": baseline.passed_runs,
+            "candidate": candidate.passed_runs,
+            "delta": candidate.passed_runs - baseline.passed_runs,
+        },
+        {
+            "metric": "Failed",
+            "baseline": baseline.failed_runs,
+            "candidate": candidate.failed_runs,
+            "delta": candidate.failed_runs - baseline.failed_runs,
+        },
+        {
+            "metric": "Success Rate (%)",
+            "baseline": round(baseline.success_rate, 1),
+            "candidate": round(candidate.success_rate, 1),
+            "delta": round(comparison.success_rate_delta, 1),
+        },
+        {
+            "metric": "Average Latency (s)",
+            "baseline": round(baseline.average_latency, 3),
+            "candidate": round(candidate.average_latency, 3),
+            "delta": round(comparison.latency_delta, 3),
+        },
+    ]
+
+
+def comparison_case_rows(
+    cases: Iterable[CaseExperimentComparison],
+) -> list[dict[str, Any]]:
+    """Convert common per-case comparisons into display rows."""
+    return [
+        {
+            "case_id": summarize_text(case.case_id),
+            "baseline_runs": case.baseline_runs,
+            "baseline_passes": case.baseline_passes,
+            "baseline_success_rate": round(case.baseline_success_rate, 1),
+            "candidate_runs": case.candidate_runs,
+            "candidate_passes": case.candidate_passes,
+            "candidate_success_rate": round(case.candidate_success_rate, 1),
+            "delta": round(case.delta, 1),
+            "change": case.change.upper(),
+        }
+        for case in cases
+    ]
+
+
+def comparison_failure_rows(
+    failure_types: Iterable[FailureTypeComparison],
+) -> list[dict[str, Any]]:
+    """Convert failure taxonomy comparisons into display rows."""
+    return [
+        {
+            "failure_type": summarize_text(failure.failure_type),
+            "baseline": failure.baseline_count,
+            "candidate": failure.candidate_count,
+            "delta": failure.delta,
+        }
+        for failure in failure_types
     ]
 
 

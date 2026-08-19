@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentlab.adapters import RepoDoctorAdapter
+from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.experiments import (
@@ -13,7 +14,12 @@ from agentlab.experiments import (
     ExperimentPreflightError,
     run_experiment,
 )
-from agentlab.models import EvalResult, Experiment, ExperimentMetrics
+from agentlab.models import (
+    EvalResult,
+    Experiment,
+    ExperimentComparison,
+    ExperimentMetrics,
+)
 from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
@@ -237,6 +243,25 @@ def show_experiment(experiment_id: str):
     _render_experiment(experiment, metrics)
 
 
+@app.command("compare")
+def compare_experiment_command(
+    baseline_experiment_id: str,
+    candidate_experiment_id: str,
+):
+    """Compare two persisted experiments without running new evaluations."""
+    storage = _open_storage(read_only=True)
+    try:
+        comparison = compare_experiments(
+            storage,
+            baseline_experiment_id,
+            candidate_experiment_id,
+        )
+    except (ExperimentComparisonError, StorageError) as error:
+        console.print(f"[red]Could not compare experiments: {error}[/red]")
+        raise typer.Exit(1) from error
+    _render_experiment_comparison(comparison)
+
+
 def _render_experiment(
     experiment: Experiment,
     metrics: ExperimentMetrics,
@@ -288,6 +313,141 @@ def _render_experiment(
         console.print(failure_table)
 
 
+def _render_experiment_comparison(comparison: ExperimentComparison) -> None:
+    baseline = comparison.baseline
+    candidate = comparison.candidate
+    console.print()
+    console.print("[bold cyan]Experiment Comparison[/bold cyan]")
+    console.print(
+        f"[bold]Baseline:[/bold] {baseline.experiment.label} "
+        f"({baseline.experiment.experiment_id})"
+    )
+    console.print(
+        f"[bold]Candidate:[/bold] {candidate.experiment.label} "
+        f"({candidate.experiment.experiment_id})"
+    )
+    if comparison.compatibility.is_equivalent:
+        console.print("[bold]Compatibility:[/bold] [green]EQUIVALENT[/green]")
+    else:
+        console.print(
+            "[bold]Compatibility:[/bold] "
+            "[yellow]NON-EQUIVALENT COMPARISON[/yellow]"
+        )
+        for warning in comparison.compatibility.warnings:
+            console.print(f"[yellow]Warning: {warning}[/yellow]")
+
+    console.print()
+    console.print("[bold]Overall[/bold]")
+    overall = Table(box=None, pad_edge=False)
+    overall.add_column("Metric")
+    overall.add_column("Baseline", justify="right")
+    overall.add_column("Candidate", justify="right")
+    overall.add_column("Delta", justify="right")
+    overall.add_row(
+        "Total Runs",
+        str(baseline.total_runs),
+        str(candidate.total_runs),
+        _format_count_delta(candidate.total_runs - baseline.total_runs),
+    )
+    overall.add_row(
+        "Passed",
+        str(baseline.passed_runs),
+        str(candidate.passed_runs),
+        _format_count_delta(candidate.passed_runs - baseline.passed_runs),
+    )
+    overall.add_row(
+        "Failed",
+        str(baseline.failed_runs),
+        str(candidate.failed_runs),
+        _format_count_delta(candidate.failed_runs - baseline.failed_runs),
+    )
+    overall.add_row(
+        "Success Rate",
+        f"{baseline.success_rate:.1f}%",
+        f"{candidate.success_rate:.1f}%",
+        _format_rate_delta(comparison.success_rate_delta),
+    )
+    overall.add_row(
+        "Avg Latency",
+        f"{baseline.average_latency:.2f}s",
+        f"{candidate.average_latency:.2f}s",
+        f"{comparison.latency_delta:+.2f}s",
+    )
+    console.print(overall)
+
+    console.print()
+    console.print("[bold]Per Case[/bold]")
+    case_table = Table(box=None, pad_edge=False)
+    case_table.add_column("Case")
+    case_table.add_column("Baseline", justify="right")
+    case_table.add_column("Candidate", justify="right")
+    case_table.add_column("Delta", justify="right")
+    case_table.add_column("Change")
+    for case in comparison.per_case:
+        case_table.add_row(
+            case.case_id,
+            (
+                f"{case.baseline_passes}/{case.baseline_runs} "
+                f"({case.baseline_success_rate:.1f}%)"
+            ),
+            (
+                f"{case.candidate_passes}/{case.candidate_runs} "
+                f"({case.candidate_success_rate:.1f}%)"
+            ),
+            _format_rate_delta(case.delta),
+            case.change.upper(),
+        )
+    if comparison.per_case:
+        console.print(case_table)
+    else:
+        console.print("No common executed cases.")
+
+    _render_changed_cases("Improvements", comparison, "improved")
+    _render_changed_cases("Regressions", comparison, "regressed")
+
+    console.print()
+    console.print("[bold]Failure Types[/bold]")
+    if not comparison.failure_types:
+        console.print("None")
+    else:
+        failure_table = Table(box=None, pad_edge=False)
+        failure_table.add_column("Failure Type")
+        failure_table.add_column("Baseline", justify="right")
+        failure_table.add_column("Candidate", justify="right")
+        failure_table.add_column("Delta", justify="right")
+        for failure in comparison.failure_types:
+            failure_table.add_row(
+                failure.failure_type,
+                str(failure.baseline_count),
+                str(failure.candidate_count),
+                _format_count_delta(failure.delta),
+            )
+        console.print(failure_table)
+
+
+def _render_changed_cases(
+    heading: str,
+    comparison: ExperimentComparison,
+    change: str,
+) -> None:
+    console.print()
+    console.print(f"[bold]{heading}[/bold]")
+    changed = [case for case in comparison.per_case if case.change == change]
+    if not changed:
+        console.print("None")
+        return
+    for case in changed:
+        console.print(f"{case.case_id}: {_format_rate_delta(case.delta)}")
+
+
+def _format_count_delta(delta: int) -> str:
+    return f"{delta:+d}"
+
+
+def _format_rate_delta(delta: float) -> str:
+    return f"{delta:+.1f} pp"
+
+
 def _experiment_status_markup(status: str) -> str:
     if status == "completed":
         return "[green]COMPLETED[/green]"
@@ -298,9 +458,9 @@ def _experiment_status_markup(status: str) -> str:
     return "[cyan]RUNNING[/cyan]"
 
 
-def _open_storage() -> SQLiteStorage:
+def _open_storage(*, read_only: bool = False) -> SQLiteStorage:
     try:
-        return SQLiteStorage(default_database_path())
+        return SQLiteStorage(default_database_path(), read_only=read_only)
     except StorageError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
