@@ -1,12 +1,19 @@
 from collections.abc import Sequence
+from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from agentlab.adapters import RepoDoctorAdapter
 from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
-from agentlab.models import EvalResult
+from agentlab.experiments import (
+    ExperimentAbortedError,
+    ExperimentPreflightError,
+    run_experiment,
+)
+from agentlab.models import EvalResult, Experiment, ExperimentMetrics
 from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
@@ -139,6 +146,156 @@ def show_recent_runs():
         status = "[green]PASS[/green]" if run.status == "PASS" else "[red]FAIL[/red]"
         table.add_row(run.run_id, run.case_id, status, f"{run.total_latency:.2f}s")
     console.print(table)
+
+
+@app.command("experiment")
+def run_experiment_command(
+    dataset: str,
+    trials: Annotated[
+        int,
+        typer.Option(
+            "--trials",
+            min=1,
+            help="Number of independent trials for each selected case.",
+        ),
+    ] = 3,
+    label: Annotated[
+        str | None,
+        typer.Option("--label", help="Human-readable label."),
+    ] = None,
+    case_ids: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--case",
+            help="Run only this case id; repeat the option to select multiple cases.",
+        ),
+    ] = None,
+):
+    """Run a persisted repeated-trial evaluation experiment."""
+    cases = load_dataset(dataset, validate_initial_state=False)
+    storage = _open_storage()
+    try:
+        execution = run_experiment(
+            cases=cases,
+            dataset=dataset,
+            storage=storage,
+            adapter=RepoDoctorAdapter(),
+            trials_per_case=trials,
+            label=label,
+            case_ids=case_ids,
+        )
+    except ExperimentPreflightError as error:
+        console.print(f"[red]{error}[/red]")
+        console.print(f"Experiment: {error.experiment_id}")
+        console.print("Status: [red]ABORTED[/red]")
+        console.print("Runs executed: 0")
+        raise typer.Exit(1) from error
+    except (ExperimentAbortedError, StorageError, ValueError) as error:
+        console.print(f"[red]Experiment aborted: {error}[/red]")
+        if isinstance(error, ExperimentAbortedError):
+            console.print(f"Experiment: {error.experiment_id}")
+        raise typer.Exit(1) from error
+    _render_experiment(execution.experiment, execution.metrics)
+
+
+@app.command("experiments")
+def show_recent_experiments():
+    """Show the 20 most recent persisted experiments."""
+    storage = _open_storage()
+    experiments = storage.list_experiments(limit=20)
+    if not experiments:
+        console.print("No experiments yet.")
+        return
+    table = Table(box=None, pad_edge=False)
+    table.add_column("Experiment ID", no_wrap=True)
+    table.add_column("Label")
+    table.add_column("Status")
+    table.add_column("Runs", justify="right")
+    table.add_column("Trials/Case", justify="right")
+    table.add_column("Started")
+    for experiment in experiments:
+        table.add_row(
+            experiment.experiment_id,
+            experiment.label,
+            _experiment_status_markup(experiment.status),
+            str(experiment.total_runs),
+            str(experiment.trials_per_case),
+            experiment.started_at,
+        )
+    console.print(table)
+
+
+@app.command("experiment-show")
+def show_experiment(experiment_id: str):
+    """Show metadata and aggregate metrics for one persisted experiment."""
+    storage = _open_storage()
+    experiment = storage.get_experiment(experiment_id)
+    if experiment is None:
+        console.print(f"[red]Experiment not found: {experiment_id}[/red]")
+        raise typer.Exit(1)
+    metrics = storage.get_experiment_metrics(experiment_id)
+    _render_experiment(experiment, metrics)
+
+
+def _render_experiment(
+    experiment: Experiment,
+    metrics: ExperimentMetrics,
+) -> None:
+    console.print()
+    console.print(f"[bold cyan]Experiment:[/bold cyan] {experiment.experiment_id}")
+    console.print(f"[bold]Label:[/bold] {experiment.label}")
+    console.print(f"[bold]Dataset:[/bold] {experiment.dataset}")
+    console.print(f"[bold]Adapter:[/bold] {experiment.adapter}")
+    console.print(f"[bold]Model:[/bold] {experiment.model or 'not recorded'}")
+    console.print(
+        f"[bold]Status:[/bold] {_experiment_status_markup(experiment.status)}"
+    )
+    console.print(f"[bold]Trials per case:[/bold] {experiment.trials_per_case}")
+    console.print(f"[bold]Runs:[/bold] {metrics.total_runs}")
+    console.print(f"[bold]Passed:[/bold] {metrics.passed_runs}")
+    console.print(f"[bold]Failed:[/bold] {metrics.failed_runs}")
+    console.print(f"[bold]Success Rate:[/bold] {metrics.success_rate:.1f}%")
+    console.print(f"[bold]Average Latency:[/bold] {metrics.average_latency:.2f}s")
+
+    console.print()
+    console.print("[bold]Per Case[/bold]")
+    case_table = Table(box=None, pad_edge=False)
+    case_table.add_column("Case")
+    case_table.add_column("Passed", justify="right")
+    case_table.add_column("Runs", justify="right")
+    case_table.add_column("Success Rate", justify="right")
+    case_table.add_column("Avg Latency", justify="right")
+    for case in metrics.per_case:
+        case_table.add_row(
+            case.case_id,
+            str(case.passed_runs),
+            str(case.total_runs),
+            f"{case.success_rate:.1f}%",
+            f"{case.average_latency:.2f}s",
+        )
+    console.print(case_table)
+
+    console.print()
+    console.print("[bold]Failure Types[/bold]")
+    if not metrics.failure_types:
+        console.print("None")
+    else:
+        failure_table = Table(box=None, pad_edge=False)
+        failure_table.add_column("Failure Type")
+        failure_table.add_column("Count", justify="right")
+        for failure_type, count in metrics.failure_types:
+            failure_table.add_row(failure_type, str(count))
+        console.print(failure_table)
+
+
+def _experiment_status_markup(status: str) -> str:
+    if status == "completed":
+        return "[green]COMPLETED[/green]"
+    if status == "completed_with_failures":
+        return "[yellow]COMPLETED WITH FAILURES[/yellow]"
+    if status == "aborted":
+        return "[red]ABORTED[/red]"
+    return "[cyan]RUNNING[/cyan]"
 
 
 def _open_storage() -> SQLiteStorage:

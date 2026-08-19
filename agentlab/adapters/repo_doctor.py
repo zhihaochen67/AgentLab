@@ -10,7 +10,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentlab.adapters.base import AgentAdapter, AgentExecutionError, AgentRunResult
+from agentlab.adapters.base import (
+    AgentAdapter,
+    AgentExecutionError,
+    AgentPreflightError,
+    AgentPreflightResult,
+    AgentRunResult,
+)
 from agentlab.diagnostics import (
     AgentDiagnostics,
     AgentFailureType,
@@ -27,6 +33,19 @@ class RepoDoctorAdapter(AgentAdapter):
 
     executable: str = "repo-doctor"
     verification_timeout: int = 120
+
+    def preflight(self) -> AgentPreflightResult:
+        """Require Repo Doctor provider settings without exposing their values."""
+        names = (
+            "REPO_DOCTOR_API_KEY",
+            "REPO_DOCTOR_BASE_URL",
+            "REPO_DOCTOR_MODEL",
+        )
+        values = {name: os.environ.get(name, "").strip() for name in names}
+        missing = tuple(name for name in names if not values[name])
+        if missing:
+            raise AgentPreflightError(missing)
+        return AgentPreflightResult(model=values["REPO_DOCTOR_MODEL"])
 
     def repair(self, workspace: Path, task: str) -> AgentRunResult:
         """Run one Repo Doctor semantic repair in the temporary workspace.

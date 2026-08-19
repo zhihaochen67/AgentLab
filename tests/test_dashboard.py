@@ -1,9 +1,14 @@
+from agentlab.models import CaseExperimentMetrics, Experiment, ExperimentMetrics
 from agentlab.storage import StoredRun
 from agentlab.tracer import TraceEvent
 from dashboard.view_models import (
     event_data_for_display,
     event_elapsed,
     event_status,
+    experiment_case_rows,
+    experiment_detail_data,
+    experiment_failure_rows,
+    experiment_table_rows,
     failure_diagnostics_for_display,
     format_failure_diagnostics,
     run_detail_data,
@@ -180,3 +185,62 @@ def test_legacy_repo_doctor_trace_is_diagnosed_without_database_migration() -> N
     assert formatted is not None
     assert formatted["failure_type"] == "REPAIR_VERIFICATION_FAILED"
     assert formatted["rollback_result"] == "SUCCESS"
+
+
+def test_dashboard_experiment_view_models_are_aggregated_and_redacted(monkeypatch) -> None:
+    secret = "dashboard-experiment-secret-123456"
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
+    experiment = Experiment(
+        experiment_id="experiment-one",
+        label=f"baseline-{secret}",
+        dataset="dataset.yaml",
+        adapter="RepoDoctorAdapter",
+        model="deepseek-chat",
+        trials_per_case=3,
+        total_cases=1,
+        total_runs=3,
+        started_at="2026-08-19T01:00:00+00:00",
+        finished_at="2026-08-19T01:01:00+00:00",
+        status="completed_with_failures",
+    )
+    metrics = ExperimentMetrics(
+        experiment_id="experiment-one",
+        total_runs=3,
+        passed_runs=2,
+        failed_runs=1,
+        success_rate=200 / 3,
+        average_latency=10.25,
+        per_case=(
+            CaseExperimentMetrics(
+                "settings_parser_001",
+                3,
+                2,
+                1,
+                200 / 3,
+                10.25,
+            ),
+        ),
+        failure_types=(("repair_verification_failed", 1),),
+    )
+
+    table = experiment_table_rows((experiment,))
+    detail = experiment_detail_data(experiment, metrics)
+    cases = experiment_case_rows(metrics.per_case)
+    failures = experiment_failure_rows(metrics.failure_types)
+
+    assert secret not in repr(table)
+    assert secret not in repr(detail)
+    assert "[REDACTED]" in table[0]["label"]
+    assert detail["total_runs"] == 3
+    assert detail["success_rate"] == 200 / 3
+    assert cases == [
+        {
+            "case_id": "settings_parser_001",
+            "passed": 2,
+            "failed": 1,
+            "runs": 3,
+            "success_rate": 66.7,
+            "average_latency": 10.25,
+        }
+    ]
+    assert failures == [{"failure_type": "repair_verification_failed", "count": 1}]

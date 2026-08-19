@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from agentlab.diagnostics import diagnostics_from_trace_data
+from agentlab.models import CaseExperimentMetrics, Experiment, ExperimentMetrics
 from agentlab.replay import event_elapsed, event_status
 from agentlab.storage import StoredRun
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
@@ -53,7 +54,85 @@ def run_detail_data(run: StoredRun) -> dict[str, Any]:
         "started_at": summarize_text(run.started_at),
         "finished_at": summarize_text(run.finished_at),
         "error": summarize_text(run.error) if run.error is not None else None,
+        "experiment_id": (
+            summarize_text(run.experiment_id) if run.experiment_id is not None else None
+        ),
+        "trial_index": run.trial_index,
     }
+
+
+def experiment_table_rows(experiments: Iterable[Experiment]) -> list[dict[str, Any]]:
+    """Convert experiment metadata into read-only table rows."""
+    return [
+        {
+            "experiment_id": summarize_text(experiment.experiment_id),
+            "label": summarize_text(experiment.label),
+            "status": experiment.status.upper(),
+            "runs": experiment.total_runs,
+            "trials_per_case": experiment.trials_per_case,
+            "started_at": summarize_text(experiment.started_at),
+        }
+        for experiment in experiments
+    ]
+
+
+def experiment_detail_data(
+    experiment: Experiment,
+    metrics: ExperimentMetrics,
+) -> dict[str, Any]:
+    """Create a sanitized experiment detail view model."""
+    return {
+        "experiment_id": summarize_text(experiment.experiment_id),
+        "label": summarize_text(experiment.label),
+        "dataset": summarize_text(experiment.dataset),
+        "adapter": summarize_text(experiment.adapter),
+        "model": (
+            summarize_text(experiment.model)
+            if experiment.model is not None
+            else "Not recorded"
+        ),
+        "trials_per_case": experiment.trials_per_case,
+        "total_cases": experiment.total_cases,
+        "total_runs": metrics.total_runs,
+        "passed_runs": metrics.passed_runs,
+        "failed_runs": metrics.failed_runs,
+        "success_rate": metrics.success_rate,
+        "average_latency": metrics.average_latency,
+        "started_at": summarize_text(experiment.started_at),
+        "finished_at": (
+            summarize_text(experiment.finished_at)
+            if experiment.finished_at is not None
+            else "In progress"
+        ),
+        "status": experiment.status.upper(),
+    }
+
+
+def experiment_case_rows(
+    cases: Iterable[CaseExperimentMetrics],
+) -> list[dict[str, Any]]:
+    """Convert per-case experiment aggregates into display rows."""
+    return [
+        {
+            "case_id": summarize_text(case.case_id),
+            "passed": case.passed_runs,
+            "failed": case.failed_runs,
+            "runs": case.total_runs,
+            "success_rate": round(case.success_rate, 1),
+            "average_latency": round(case.average_latency, 3),
+        }
+        for case in cases
+    ]
+
+
+def experiment_failure_rows(
+    failure_types: Iterable[tuple[str, int]],
+) -> list[dict[str, Any]]:
+    """Convert failure taxonomy counts into display rows."""
+    return [
+        {"failure_type": summarize_text(failure_type), "count": count}
+        for failure_type, count in failure_types
+    ]
 
 
 def trace_table_rows(events: Iterable[TraceEvent]) -> list[dict[str, Any]]:

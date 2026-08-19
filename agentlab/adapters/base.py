@@ -29,9 +29,29 @@ class AgentExecutionError(RuntimeError):
         return self.result.diagnostics
 
 
+@dataclass(frozen=True)
+class AgentPreflightResult:
+    """Non-secret adapter metadata established before evaluation begins."""
+
+    model: str | None = None
+
+
+class AgentPreflightError(RuntimeError):
+    """An adapter cannot safely start an experiment."""
+
+    def __init__(self, missing_variables: tuple[str, ...]) -> None:
+        self.missing_variables = missing_variables
+        names = ", ".join(missing_variables)
+        super().__init__(f"Missing provider configuration: {names}")
+
+
 class AgentAdapter(ABC):
     """Apply an agent's repair workflow to an isolated evaluation workspace."""
 
     @abstractmethod
     def repair(self, workspace: Path, task: str) -> AgentRunResult | None:
         """Attempt *task* by modifying only *workspace*."""
+
+    def preflight(self) -> AgentPreflightResult:
+        """Validate experiment prerequisites without executing an evaluation."""
+        return AgentPreflightResult()

@@ -26,6 +26,10 @@ from agentlab.tracer import TraceEvent
 from dashboard.view_models import (
     event_data_for_display,
     event_status,
+    experiment_case_rows,
+    experiment_detail_data,
+    experiment_failure_rows,
+    experiment_table_rows,
     failure_diagnostics_for_display,
     format_failure_diagnostics,
     run_detail_data,
@@ -164,6 +168,9 @@ def render_event_details(events: Sequence[TraceEvent]) -> None:
 
 def render_detail_selector(storage: RunStorage) -> None:
     runs = storage.list_runs(limit=DASHBOARD_RUN_LIMIT)
+    if not runs:
+        st.info("No evaluation runs yet.")
+        return
     selected = st.selectbox(
         "Run",
         runs,
@@ -171,6 +178,71 @@ def render_detail_selector(storage: RunStorage) -> None:
         key="detail_selected_run",
     )
     render_run_detail(storage, selected.run_id)
+
+
+def experiment_option(experiment) -> str:
+    return f"{experiment.status.upper()} · {experiment.label} · {experiment.experiment_id}"
+
+
+def render_experiments(storage: RunStorage) -> None:
+    st.header("Experiments")
+    experiments = storage.list_experiments(limit=DASHBOARD_RUN_LIMIT)
+    if not experiments:
+        st.info("No experiments yet.")
+        return
+
+    st.subheader("Experiment List")
+    st.dataframe(
+        experiment_table_rows(experiments),
+        width="stretch",
+        hide_index=True,
+    )
+    selected = st.selectbox(
+        "Experiment",
+        experiments,
+        format_func=experiment_option,
+        key="experiment_selected",
+    )
+    metrics = storage.get_experiment_metrics(selected.experiment_id)
+    detail = experiment_detail_data(selected, metrics)
+
+    st.subheader("Experiment Detail")
+    st.code(detail["experiment_id"], language=None)
+    first, second = st.columns(2)
+    with first:
+        st.write("**Label:**", detail["label"])
+        st.write("**Dataset:**", detail["dataset"])
+        st.write("**Adapter:**", detail["adapter"])
+        st.write("**Model:**", detail["model"])
+        st.write("**Status:**", detail["status"])
+    with second:
+        st.write("**Trials / case:**", detail["trials_per_case"])
+        st.write("**Total cases:**", detail["total_cases"])
+        st.write("**Started:**", detail["started_at"])
+        st.write("**Finished:**", detail["finished_at"])
+
+    metrics_columns = st.columns(5)
+    metrics_columns[0].metric("Total Runs", detail["total_runs"])
+    metrics_columns[1].metric("Passed", detail["passed_runs"])
+    metrics_columns[2].metric("Failed", detail["failed_runs"])
+    metrics_columns[3].metric("Success Rate", f"{detail['success_rate']:.1f}%")
+    metrics_columns[4].metric(
+        "Average Latency", f"{detail['average_latency']:.2f}s"
+    )
+
+    st.subheader("Per-Case Results")
+    case_rows = experiment_case_rows(metrics.per_case)
+    if case_rows:
+        st.dataframe(case_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No evaluation runs were executed.")
+
+    st.subheader("Failure Type Distribution")
+    failure_rows = experiment_failure_rows(metrics.failure_types)
+    if failure_rows:
+        st.dataframe(failure_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No failures recorded.")
 
 
 def render_replay_event(event: ReplayEventView) -> None:
@@ -279,6 +351,9 @@ def render_replay(storage: RunStorage) -> None:
     st.info("No side effects are re-executed. This view only reads persisted history.")
 
     runs = storage.list_runs(limit=DASHBOARD_RUN_LIMIT)
+    if not runs:
+        st.info("No evaluation runs are available for replay.")
+        return
     selected = st.selectbox(
         "Historical run",
         runs,
@@ -344,13 +419,14 @@ def main() -> None:
     try:
         storage = SQLiteStorage(database_path, read_only=True)
         stats = storage.get_stats()
-        if stats.total_runs == 0:
+        has_experiments = bool(storage.list_experiments(limit=1))
+        if stats.total_runs == 0 and not has_experiments:
             st.header("AgentLab Dashboard")
             st.info("No evaluation runs yet.")
             return
 
         view = st.sidebar.radio(
-            "View", ("Overview", "Runs", "Run Detail", "Replay")
+            "View", ("Overview", "Runs", "Run Detail", "Replay", "Experiments")
         )
         st.sidebar.caption(f"Database: {database_path}")
         if view == "Overview":
@@ -359,8 +435,10 @@ def main() -> None:
             render_runs(storage)
         elif view == "Run Detail":
             render_detail_selector(storage)
-        else:
+        elif view == "Replay":
             render_replay(storage)
+        else:
+            render_experiments(storage)
     except (StorageError, ValueError) as error:
         st.error(f"Could not load AgentLab data: {error}")
 
