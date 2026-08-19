@@ -42,10 +42,18 @@ class ExperimentPreflightError(ExperimentAbortedError):
         self,
         experiment_id: str,
         missing_variables: tuple[str, ...],
+        invalid_variables: tuple[str, ...] = (),
     ) -> None:
         self.missing_variables = missing_variables
-        names = ", ".join(missing_variables)
-        super().__init__(experiment_id, f"Missing provider configuration: {names}")
+        self.invalid_variables = invalid_variables
+        if invalid_variables:
+            message = ", ".join(
+                f"{name} appears invalid" for name in invalid_variables
+            )
+        else:
+            names = ", ".join(missing_variables)
+            message = f"Missing provider configuration: {names}"
+        super().__init__(experiment_id, message)
 
 
 def new_experiment_id() -> str:
@@ -113,7 +121,11 @@ def run_experiment(
             status="aborted",
         )
         storage.create_experiment(aborted)
-        raise ExperimentPreflightError(identifier, error.missing_variables) from error
+        raise ExperimentPreflightError(
+            identifier,
+            error.missing_variables,
+            error.invalid_variables,
+        ) from error
 
     running = Experiment(
         experiment_id=identifier,

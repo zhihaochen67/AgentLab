@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from agentlab.adapters import AgentAdapter, AgentExecutionError, RepoDoctorAdapter
+from agentlab.adapters import (
+    AgentAdapter,
+    AgentExecutionError,
+    AgentPreflightError,
+    RepoDoctorAdapter,
+)
 from agentlab.adapters.repo_doctor import WORKSPACE_MARKER
 from agentlab.diagnostics import AgentFailureType
 from agentlab.runner import create_workspace
@@ -13,6 +18,49 @@ from agentlab.runner import create_workspace
 def test_agent_adapter_is_abstract() -> None:
     with pytest.raises(TypeError):
         AgentAdapter()
+
+
+def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(monkeypatch) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "  sk-test_0123456789abcdef  ")
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", " https://provider.invalid/v1 ")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", " model-name ")
+
+    result = RepoDoctorAdapter().preflight()
+
+    assert result.model == "model-name"
+
+
+@pytest.mark.parametrize(
+    "api_key",
+    [
+        None,
+        "",
+        "   \t",
+        "这是你的真实 DeepSeek API Key",
+        "your api key goes here",
+        "sk-0123456789abcd密钥",
+        "short-key",
+    ],
+)
+def test_repo_doctor_preflight_rejects_obviously_invalid_api_keys(
+    monkeypatch,
+    api_key,
+) -> None:
+    if api_key is None:
+        monkeypatch.delenv("REPO_DOCTOR_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("REPO_DOCTOR_API_KEY", api_key)
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "model-name")
+
+    with pytest.raises(
+        AgentPreflightError,
+        match="^REPO_DOCTOR_API_KEY appears invalid$",
+    ) as captured:
+        RepoDoctorAdapter().preflight()
+
+    if api_key:
+        assert api_key not in str(captured.value)
 
 
 def test_repo_doctor_rejects_non_agentlab_workspace() -> None:

@@ -106,6 +106,41 @@ def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
         assert secret.encode() not in database.read_bytes()
 
 
+def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> None:
+    secret = "your api key must be replaced in cli"
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "model-name")
+    with tempfile.TemporaryDirectory(prefix="agentlab-cli-experiment-") as directory:
+        database = Path(directory) / "agentlab.db"
+        monkeypatch.setenv("AGENTLAB_DB_PATH", str(database))
+        monkeypatch.setattr(
+            "agentlab.cli.load_dataset",
+            lambda _dataset, **_kwargs: [EvalCase("case-a", "unused", "Fix A")],
+        )
+        monkeypatch.setattr(
+            "agentlab.experiments.evaluate_case",
+            lambda *_args, **_kwargs: pytest.fail("evaluation must not run"),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["experiment", "dataset.yaml", "--trials", "2"],
+        )
+        storage = SQLiteStorage(database)
+        experiments = storage.list_experiments()
+
+        assert result.exit_code == 1
+        assert "REPO_DOCTOR_API_KEY appears invalid" in result.stdout
+        assert "Runs executed: 0" in result.stdout
+        assert secret not in result.stdout
+        assert len(experiments) == 1
+        assert experiments[0].status == "aborted"
+        assert experiments[0].total_runs == 0
+        assert storage.list_runs() == ()
+        assert secret.encode() not in database.read_bytes()
+
+
 def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-cli-experiment-") as directory:
         database = Path(directory) / "agentlab.db"

@@ -39,10 +39,22 @@ class AgentPreflightResult:
 class AgentPreflightError(RuntimeError):
     """An adapter cannot safely start an experiment."""
 
-    def __init__(self, missing_variables: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        missing_variables: tuple[str, ...] = (),
+        *,
+        invalid_variables: tuple[str, ...] = (),
+    ) -> None:
         self.missing_variables = missing_variables
-        names = ", ".join(missing_variables)
-        super().__init__(f"Missing provider configuration: {names}")
+        self.invalid_variables = invalid_variables
+        if invalid_variables:
+            message = ", ".join(
+                f"{name} appears invalid" for name in invalid_variables
+            )
+        else:
+            names = ", ".join(missing_variables)
+            message = f"Missing provider configuration: {names}"
+        super().__init__(message)
 
 
 class AgentAdapter(ABC):

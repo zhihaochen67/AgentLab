@@ -220,6 +220,64 @@ def test_repo_doctor_preflight_aborts_without_runs_or_secret(monkeypatch) -> Non
         assert secret.encode() not in database.read_bytes()
 
 
+def test_invalid_api_key_aborts_before_evaluation_repair_or_network(
+    monkeypatch,
+) -> None:
+    secret = "your api key must be replaced"
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "model-name")
+    evaluation_called = False
+    repair_called = False
+    network_called = False
+
+    def forbidden_evaluator(_case: EvalCase, _adapter: AgentAdapter) -> EvalResult:
+        nonlocal evaluation_called
+        evaluation_called = True
+        raise AssertionError("invalid preflight must prevent evaluation")
+
+    def forbidden_repair(*_args, **_kwargs):
+        nonlocal repair_called
+        repair_called = True
+        raise AssertionError("invalid preflight must prevent Repo Doctor")
+
+    def forbidden_network(*_args, **_kwargs):
+        nonlocal network_called
+        network_called = True
+        raise AssertionError("invalid preflight must prevent network access")
+
+    monkeypatch.setattr(RepoDoctorAdapter, "repair", forbidden_repair)
+    monkeypatch.setattr("socket.create_connection", forbidden_network)
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-experiment-") as directory:
+        database = Path(directory) / "agentlab.db"
+        storage = SQLiteStorage(database)
+        with pytest.raises(ExperimentPreflightError) as captured:
+            run_experiment(
+                cases=[EvalCase("case-a", "unused", "Fix A")],
+                dataset="dataset.yaml",
+                storage=storage,
+                adapter=RepoDoctorAdapter(),
+                trials_per_case=3,
+                evaluator=forbidden_evaluator,
+                validator=lambda _cases: pytest.fail("validation must not run"),
+            )
+
+        experiments = storage.list_experiments()
+        assert str(captured.value) == "REPO_DOCTOR_API_KEY appears invalid"
+        assert secret not in str(captured.value)
+        assert captured.value.missing_variables == ()
+        assert captured.value.invalid_variables == ("REPO_DOCTOR_API_KEY",)
+        assert evaluation_called is False
+        assert repair_called is False
+        assert network_called is False
+        assert len(experiments) == 1
+        assert experiments[0].status == "aborted"
+        assert experiments[0].total_runs == 0
+        assert storage.list_runs() == ()
+        assert secret.encode() not in database.read_bytes()
+
+
 def test_old_database_is_readable_and_migrates_without_losing_runs() -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-migration-") as directory:
         database = Path(directory) / "legacy.db"
