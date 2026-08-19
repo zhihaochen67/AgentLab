@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentlab.adapters.base import AgentAdapter, AgentExecutionError, AgentRunResult
+from agentlab.diagnostics import (
+    AgentDiagnostics,
+    AgentFailureType,
+    diagnose_repo_doctor,
+)
 
 WORKSPACE_MARKER = ".agentlab-workspace"
 _PYTHON_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py")
@@ -33,30 +38,79 @@ class RepoDoctorAdapter(AgentAdapter):
         workspace = self._validated_workspace(workspace)
         executable = shutil.which(self.executable)
         if executable is None:
-            raise RuntimeError(f"Repo Doctor CLI was not found: {self.executable}")
+            diagnostics = AgentDiagnostics(
+                failure_type=AgentFailureType.AGENT_PROCESS_ERROR,
+                failure_phase="process",
+                returncode=None,
+                stderr_summary=f"Repo Doctor CLI was not found: {self.executable}",
+            )
+            raise AgentExecutionError(
+                "Repo Doctor process could not start (agent_process_error)",
+                AgentRunResult(None, "", diagnostics.stderr_summary, diagnostics),
+            )
 
         scaffold = self._ensure_python_manifest(workspace)
         git_directory = workspace / ".git"
         try:
             self._create_git_baseline(workspace)
-            result = subprocess.run(
-                [
-                    executable,
-                    "fix",
-                    str(workspace),
-                    "--ai",
-                    "--timeout",
-                    str(self.verification_timeout),
-                ],
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            agent_result = AgentRunResult(result.returncode, result.stdout, result.stderr)
-            if result.returncode != 0:
+            try:
+                result = subprocess.run(
+                    [
+                        executable,
+                        "fix",
+                        str(workspace),
+                        "--ai",
+                        "--timeout",
+                        str(self.verification_timeout),
+                    ],
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                stdout = self._process_output(error.stdout)
+                stderr = self._process_output(error.stderr)
+                diagnostics = diagnose_repo_doctor(
+                    None,
+                    stdout,
+                    stderr,
+                    process_timed_out=True,
+                )
                 raise AgentExecutionError(
-                    f"Repo Doctor exited with status {result.returncode}",
+                    "Repo Doctor process timed out (timeout)",
+                    AgentRunResult(None, stdout, stderr, diagnostics),
+                ) from error
+            except OSError as error:
+                diagnostics = AgentDiagnostics(
+                    failure_type=AgentFailureType.AGENT_PROCESS_ERROR,
+                    failure_phase="process",
+                    returncode=None,
+                    stderr_summary=str(error),
+                )
+                raise AgentExecutionError(
+                    "Repo Doctor process could not start (agent_process_error)",
+                    AgentRunResult(None, "", str(error), diagnostics),
+                ) from error
+
+            patch_diff = self._capture_git_diff(workspace)
+            diagnostics = diagnose_repo_doctor(
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                patch_diff=patch_diff,
+            )
+            agent_result = AgentRunResult(
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                diagnostics,
+            )
+            if result.returncode != 0:
+                failure_type = diagnostics.failure_type or AgentFailureType.UNKNOWN_AGENT_ERROR
+                raise AgentExecutionError(
+                    f"Repo Doctor failed during {diagnostics.failure_phase or 'agent'} "
+                    f"({failure_type.value})",
                     agent_result,
                 )
             return agent_result
@@ -71,6 +125,27 @@ class RepoDoctorAdapter(AgentAdapter):
     def _remove_readonly(function, path: str, _error) -> None:
         os.chmod(path, stat.S_IWRITE)
         function(path)
+
+    @staticmethod
+    def _process_output(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value or ""
+
+    @staticmethod
+    def _capture_git_diff(workspace: Path) -> str | None:
+        """Capture a surviving real patch without changing repository state."""
+        try:
+            result = subprocess.run(
+                ("git", "diff", "--no-ext-diff", "--no-color", "--binary", "--"),
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        return result.stdout if result.returncode == 0 and result.stdout.strip() else None
 
     @staticmethod
     def _validated_workspace(workspace: Path) -> Path:

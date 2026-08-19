@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentlab.dataset import load_dataset
+from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.models import EvalResult
 from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
@@ -175,6 +176,7 @@ def _render_trace(
     table.add_column("Event")
     table.add_column("Status")
     table.add_column("Elapsed", justify="right")
+    table.add_column("Diagnostics")
 
     for event in events:
         status = ""
@@ -192,11 +194,60 @@ def _render_trace(
 
         elapsed = event.data.get("elapsed_time")
         elapsed_text = f"{elapsed:.2f}s" if isinstance(elapsed, (int, float)) else ""
-        table.add_row(str(event.sequence), event.event_type, status, elapsed_text)
+        diagnostics = diagnostics_from_trace_data(event.data)
+        detail = ""
+        if diagnostics and diagnostics.get("failure_type"):
+            detail = str(diagnostics["failure_type"]).upper()
+            if diagnostics.get("failure_phase"):
+                detail += f" / {diagnostics['failure_phase']}"
+        table.add_row(str(event.sequence), event.event_type, status, elapsed_text, detail)
 
     console.print(table)
+    _render_failure_diagnostics(events)
     console.print()
     console.print(f"Total latency: {total_latency:.2f}s")
+
+
+def _render_failure_diagnostics(events: Sequence[TraceEvent]) -> None:
+    diagnostics = next(
+        (
+            item
+            for event in reversed(events)
+            if (item := diagnostics_from_trace_data(event.data))
+            and item.get("failure_type")
+        ),
+        None,
+    )
+    if diagnostics is None:
+        return
+
+    console.print()
+    console.print("[bold red]Failure Diagnostics[/bold red]")
+    table = Table(box=None, pad_edge=False, show_header=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    fields = (
+        ("Failure Type", str(diagnostics.get("failure_type", "")).upper()),
+        ("Failure Phase", diagnostics.get("failure_phase")),
+        ("Return Code", diagnostics.get("returncode")),
+        ("Patch Applied", diagnostics.get("patch_applied")),
+        ("Verification Failed", diagnostics.get("verification_failed")),
+        ("Rollback Attempted", diagnostics.get("rollback_attempted")),
+        ("Rollback Succeeded", diagnostics.get("rollback_succeeded")),
+        ("Verification Command", diagnostics.get("verification_command")),
+        ("Verification Return Code", diagnostics.get("verification_returncode")),
+    )
+    for label, value in fields:
+        table.add_row(label, "not available" if value is None else str(value))
+    console.print(table)
+    for label, key in (
+        ("Verification Output", "verification_output"),
+        ("Patch / Diff", "patch_diff"),
+    ):
+        value = diagnostics.get(key)
+        if value:
+            console.print(f"[bold]{label}:[/bold]")
+            console.print(str(value), markup=False)
 
 
 if __name__ == "__main__":

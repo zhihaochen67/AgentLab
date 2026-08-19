@@ -100,11 +100,14 @@ def _run_traced_pytest(workspace: Path, tracer: Tracer, phase: str) -> PytestRun
 def _agent_result_data(result: AgentRunResult | None) -> dict:
     if result is None:
         return {"returncode": None, "stdout": "", "stderr": ""}
-    return {
+    data = {
         "returncode": result.returncode,
         "stdout": summarize_text(result.stdout),
         "stderr": summarize_text(result.stderr),
     }
+    if result.diagnostics is not None:
+        data["diagnostics"] = result.diagnostics.to_trace_data()
+    return data
 
 
 def _run_traced_agent(
@@ -185,12 +188,22 @@ def evaluate_case(
 
     except Exception as error:  # noqa: BLE001 - evaluation errors become trace evidence.
         error_message = summarize_text(error)
-        active_tracer.emit(
-            "error",
-            phase=phase,
-            error_type=type(error).__name__,
-            message=error_message,
-        )
+        error_data = {
+            "phase": phase,
+            "error_type": type(error).__name__,
+            "message": error_message,
+        }
+        if isinstance(error, AgentExecutionError) and error.diagnostics is not None:
+            diagnostics = error.diagnostics
+            error_data.update(
+                failure_type=(
+                    diagnostics.failure_type.value
+                    if diagnostics.failure_type is not None
+                    else None
+                ),
+                failure_phase=diagnostics.failure_phase,
+            )
+        active_tracer.emit("error", **error_data)
 
     finally:
         if workspace is not None:

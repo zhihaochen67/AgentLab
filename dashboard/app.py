@@ -26,6 +26,8 @@ from agentlab.tracer import TraceEvent
 from dashboard.view_models import (
     event_data_for_display,
     event_status,
+    failure_diagnostics_for_display,
+    format_failure_diagnostics,
     run_detail_data,
     run_table_rows,
     status_label,
@@ -35,6 +37,12 @@ from dashboard.view_models import (
 RECENT_RUN_LIMIT = 10
 DASHBOARD_RUN_LIMIT = 500
 LONG_TEXT_FIELDS = {"stdout", "stderr"}
+DIAGNOSTIC_LONG_FIELDS = (
+    "verification_output",
+    "patch_diff",
+    "stdout_summary",
+    "stderr_summary",
+)
 
 
 def render_status(status: str) -> None:
@@ -119,6 +127,10 @@ def render_run_detail(storage: RunStorage, run_id: str) -> None:
     if data["error"]:
         st.error(data["error"])
 
+    diagnostics = failure_diagnostics_for_display(events)
+    if diagnostics is not None:
+        render_failure_diagnostics(diagnostics)
+
     st.subheader("Trace")
     st.dataframe(trace_table_rows(events), width="stretch", hide_index=True)
     render_event_details(events)
@@ -175,6 +187,10 @@ def render_replay_event(event: ReplayEventView) -> None:
     summary[2].write("**Elapsed**")
     summary[2].write(f"{event.elapsed:.3f}s" if event.elapsed is not None else "—")
 
+    diagnostics = format_failure_diagnostics(event.data.get("diagnostics"))
+    if diagnostics is not None:
+        render_failure_diagnostics(diagnostics)
+
     regular = {
         key: value
         for key, value in event.highlights.items()
@@ -206,6 +222,49 @@ def render_replay_event(event: ReplayEventView) -> None:
                 )
         if not event.data:
             st.caption("No event data.")
+
+
+def render_failure_diagnostics(diagnostics: dict) -> None:
+    st.subheader("Failure Diagnostics")
+    first, second, third = st.columns(3)
+    first.write("**Failure Type**")
+    first.write(diagnostics["failure_type"])
+    first.write("**Failure Phase**")
+    first.write(diagnostics["failure_phase"])
+    second.write("**Return Code**")
+    second.write(
+        diagnostics.get("returncode")
+        if diagnostics.get("returncode") is not None
+        else "Not available"
+    )
+    second.write("**Patch Applied**")
+    second.write(diagnostics["patch_applied_display"])
+    third.write("**Verification Result**")
+    third.write(diagnostics["verification_result"])
+    third.write("**Rollback Result**")
+    third.write(diagnostics["rollback_result"])
+
+    verification = st.columns(2)
+    verification[0].write("**Verification Command**")
+    verification[0].write(diagnostics.get("verification_command") or "Not available")
+    verification[1].write("**Verification Return Code**")
+    verification[1].write(
+        diagnostics.get("verification_returncode")
+        if diagnostics.get("verification_returncode") is not None
+        else "Not available"
+    )
+
+    labels = {
+        "verification_output": "Verification Output",
+        "patch_diff": "Patch / Diff",
+        "stdout_summary": "Agent stdout summary",
+        "stderr_summary": "Agent stderr summary",
+    }
+    for key in DIAGNOSTIC_LONG_FIELDS:
+        value = diagnostics.get(key)
+        if value:
+            with st.expander(labels[key], expanded=False):
+                st.text(str(value))
 
 
 def replay_cursor(storage_key: str, trace: ReplayTrace) -> ReplayState:

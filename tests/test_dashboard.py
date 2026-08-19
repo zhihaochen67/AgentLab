@@ -4,6 +4,8 @@ from dashboard.view_models import (
     event_data_for_display,
     event_elapsed,
     event_status,
+    failure_diagnostics_for_display,
+    format_failure_diagnostics,
     run_detail_data,
     run_table_rows,
     status_label,
@@ -113,3 +115,68 @@ def test_run_metadata_is_redacted_again_at_dashboard_boundary(monkeypatch) -> No
     assert secret not in repr(detail)
     assert secret not in repr(rows)
     assert "[REDACTED]" in repr(detail)
+
+
+def test_dashboard_formats_failure_diagnostics_and_redacts_patch(monkeypatch) -> None:
+    secret = "dashboard-diagnostic-secret-123456"
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
+    raw = {
+        "failure_type": "repair_verification_failed",
+        "failure_phase": "verification",
+        "returncode": 1,
+        "patch_applied": True,
+        "verification_failed": True,
+        "rollback_attempted": True,
+        "rollback_succeeded": True,
+        "verification_output": "Python tests failed",
+        "patch_diff": f"+password={secret}",
+    }
+
+    formatted = format_failure_diagnostics(raw)
+
+    assert formatted is not None
+    assert formatted["failure_type"] == "REPAIR_VERIFICATION_FAILED"
+    assert formatted["failure_phase"] == "verification"
+    assert formatted["patch_applied_display"] == "YES"
+    assert formatted["verification_result"] == "FAILED"
+    assert formatted["rollback_result"] == "SUCCESS"
+    assert secret not in repr(formatted)
+    assert "[REDACTED]" in formatted["patch_diff"]
+
+
+def test_legacy_trace_without_diagnostics_is_compatible() -> None:
+    legacy = TraceEvent(
+        "legacy-run",
+        1,
+        "agent_end",
+        "2026-08-18T01:00:00+00:00",
+        {"status": "error", "returncode": 1, "stdout": "old output"},
+    )
+
+    assert failure_diagnostics_for_display((legacy,)) is None
+    assert format_failure_diagnostics(None) is None
+
+
+def test_legacy_repo_doctor_trace_is_diagnosed_without_database_migration() -> None:
+    legacy = TraceEvent(
+        "legacy-repo-doctor-run",
+        5,
+        "agent_end",
+        "2026-08-18T01:00:00+00:00",
+        {
+            "adapter": "RepoDoctorAdapter",
+            "status": "error",
+            "returncode": 1,
+            "stdout": (
+                "Patch applied\nVerification failed: Python tests.\n"
+                "Rolling back\nRepository restored successfully\n"
+            ),
+            "stderr": "",
+        },
+    )
+
+    formatted = failure_diagnostics_for_display((legacy,))
+
+    assert formatted is not None
+    assert formatted["failure_type"] == "REPAIR_VERIFICATION_FAILED"
+    assert formatted["rollback_result"] == "SUCCESS"

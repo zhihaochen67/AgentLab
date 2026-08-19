@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from agentlab.adapters import AgentAdapter, RepoDoctorAdapter
+from agentlab.adapters import AgentAdapter, AgentExecutionError, RepoDoctorAdapter
 from agentlab.adapters.repo_doctor import WORKSPACE_MARKER
+from agentlab.diagnostics import AgentFailureType
 from agentlab.runner import create_workspace
 
 
@@ -36,12 +37,17 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
         executable = str(Path("C:/tools/repo-doctor.exe"))
 
         class Result:
-            returncode = 0
-            stdout = "Patch applied"
-            stderr = ""
+            def __init__(self, returncode=0, stdout="", stderr="") -> None:
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
 
         def fake_run(command, *, cwd, capture_output, text, check=False):
             calls.append((tuple(command), Path(cwd), check))
+            if tuple(command)[:2] == ("git", "diff"):
+                return Result(stdout="--- a/module.py\n+++ b/module.py\n")
+            if next(iter(command)) == executable:
+                return Result(stdout="Patch applied\nVerification passed\nChange kept\n")
             return Result()
 
         monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
@@ -50,7 +56,7 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
         try:
             result = RepoDoctorAdapter(verification_timeout=45).repair(workspace, "fix VALUE")
 
-            assert calls[-1] == (
+            assert calls[-2] == (
                 (
                     executable,
                     "fix",
@@ -62,7 +68,8 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
                 workspace.resolve(),
                 False,
             )
-            assert [call[0][:2] for call in calls[:-1]] == [
+            assert calls[-1][0][:2] == ("git", "diff")
+            assert [call[0][:2] for call in calls[:-2]] == [
                 ("git", "init"),
                 ("git", "add"),
                 ("git", "-c"),
@@ -70,6 +77,59 @@ def test_repo_doctor_uses_verified_cli_shape_and_workspace(monkeypatch) -> None:
             assert not (workspace / "requirements.txt").exists()
             assert not (workspace / WORKSPACE_MARKER).exists()
             assert result.returncode == 0
-            assert result.stdout == "Patch applied"
+            assert result.stdout.startswith("Patch applied")
+            assert result.diagnostics is not None
+            assert result.diagnostics.failure_type is None
+            assert result.diagnostics.patch_applied is True
+            assert result.diagnostics.patch_diff == "--- a/module.py\n+++ b/module.py\n"
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        source = Path(directory) / "source"
+        source.mkdir()
+        (source / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (source / "test_module.py").write_text(
+            "from module import VALUE\n\ndef test_value():\n    assert VALUE == 2\n",
+            encoding="utf-8",
+        )
+        workspace = create_workspace(str(source))
+        executable = str(Path("C:/tools/repo-doctor.exe"))
+
+        class Result:
+            returncode = 1
+            stdout = (
+                "Patch applied\n"
+                "Verification failed: Verification failed: Python tests.\n"
+                "Rolling back\n"
+                "Repository restored successfully\n"
+            )
+            stderr = ""
+
+        def fake_run(command, **_kwargs):
+            if tuple(command)[:2] == ("git", "diff"):
+                return type("DiffResult", (), {"returncode": 0, "stdout": ""})()
+            return Result()
+
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+
+        try:
+            with pytest.raises(AgentExecutionError) as captured:
+                RepoDoctorAdapter().repair(workspace, "fix VALUE")
+
+            diagnostics = captured.value.diagnostics
+            assert diagnostics is not None
+            assert (
+                diagnostics.failure_type
+                is AgentFailureType.REPAIR_VERIFICATION_FAILED
+            )
+            assert diagnostics.failure_phase == "verification"
+            assert diagnostics.patch_applied is True
+            assert diagnostics.rollback_attempted is True
+            assert diagnostics.rollback_succeeded is True
+            assert diagnostics.patch_diff is None
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
