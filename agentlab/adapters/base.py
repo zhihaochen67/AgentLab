@@ -67,3 +67,7 @@ class AgentAdapter(ABC):
     def preflight(self) -> AgentPreflightResult:
         """Validate experiment prerequisites without executing an evaluation."""
         return AgentPreflightResult()
+
+    def trace_metadata(self) -> dict[str, str]:
+        """Return non-secret metadata describing the agent execution."""
+        return {}

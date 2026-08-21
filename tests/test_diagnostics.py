@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from agentlab.adapters import AgentAdapter, AgentExecutionError, AgentRunResult
-from agentlab.diagnostics import AgentFailureType, diagnose_repo_doctor
+from agentlab.diagnostics import (
+    AgentFailureType,
+    diagnose_repo_doctor,
+    diagnose_repo_doctor_report,
+)
 from agentlab.models import EvalCase, EvalResult
 from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage
@@ -55,6 +59,51 @@ def test_timeout_is_classified() -> None:
     assert provider_timeout.failure_phase == "provider_request"
     assert process_timeout.failure_type is AgentFailureType.TIMEOUT
     assert process_timeout.failure_phase == "process"
+
+
+def test_structured_report_is_primary_diagnostics_source() -> None:
+    diagnostics = diagnose_repo_doctor_report(
+        {
+            "analysis_summary": "One complete contract was formed.",
+            "selected_finding": {"id": "finding-1"},
+            "behavioral_contract": {
+                "must_fix": ["Resolve both failures."],
+                "must_preserve": ["Keep the passing boundary."],
+                "evidence": ["2 failed, 4 passed"],
+                "rationale": "The behaviors are coupled.",
+            },
+            "patch": {"diff": "-before\n+after\n"},
+            "patch_applied": True,
+            "verification": {
+                "commands": [
+                    {
+                        "name": "Python tests",
+                        "command": ["pytest", "-q"],
+                        "returncode": 1,
+                        "passed": False,
+                        "stdout_summary": "4 passed, 2 failed",
+                        "stderr_summary": "assertion failed",
+                    }
+                ]
+            },
+            "rollback_attempted": True,
+            "rollback_succeeded": True,
+            "final_status": "rolled_back",
+        },
+        1,
+        "human-readable output changed",
+    )
+
+    assert diagnostics.failure_type is AgentFailureType.REPAIR_VERIFICATION_FAILED
+    assert diagnostics.selected_finding == {"id": "finding-1"}
+    assert diagnostics.behavioral_contract["must_preserve"] == [
+        "Keep the passing boundary."
+    ]
+    assert diagnostics.patch_diff == "-before\n+after\n"
+    assert diagnostics.verification_command == "pytest -q"
+    assert diagnostics.verification_returncode == 1
+    assert "4 passed, 2 failed" in diagnostics.verification_output
+    assert diagnostics.rollback_succeeded is True
 
 
 def test_unknown_error_is_the_safe_fallback() -> None:
@@ -139,11 +188,37 @@ def test_runner_emits_structured_diagnostics_and_cleans_workspace() -> None:
 def test_patch_diff_is_redacted_and_persisted(monkeypatch) -> None:
     secret = "diagnostic-secret-value-123456"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
-    diagnostics = diagnose_repo_doctor(
+    diagnostics = diagnose_repo_doctor_report(
+        {
+            "analysis_summary": "One finding.",
+            "selected_finding": {"id": "finding-1"},
+            "behavioral_contract": {
+                "must_fix": ["Fix the failure."],
+                "must_preserve": ["Preserve the passing case."],
+                "evidence": ["1 failed, 2 passed"],
+                "rationale": "Use one repair.",
+            },
+            "patch": {"diff": f"-password=old\n+password={secret}\n"},
+            "patch_applied": True,
+            "verification": {
+                "commands": [
+                    {
+                        "name": "Python tests",
+                        "command": ["pytest", "-q"],
+                        "returncode": 1,
+                        "passed": False,
+                        "stdout_summary": "2 passed, 1 failed",
+                        "stderr_summary": "",
+                    }
+                ]
+            },
+            "rollback_attempted": True,
+            "rollback_succeeded": True,
+            "final_status": "rolled_back",
+        },
         1,
         "Patch applied\nVerification failed: Python tests\nRolling back\n"
         "Repository restored successfully",
-        patch_diff=f"-password=old\n+password={secret}\n",
     )
     trace_data = diagnostics.to_trace_data()
     events = (
@@ -187,5 +262,12 @@ def test_patch_diff_is_redacted_and_persisted(monkeypatch) -> None:
 
         assert stored["failure_type"] == "repair_verification_failed"
         assert "[REDACTED]" in stored["patch_diff"]
+        assert stored["selected_finding"]["id"] == "finding-1"
+        assert stored["behavioral_contract"]["must_preserve"] == [
+            "Preserve the passing case."
+        ]
+        assert stored["verification_command"] == "pytest -q"
+        assert stored["verification_returncode"] == 1
+        assert "2 passed, 1 failed" in stored["verification_output"]
         assert secret not in repr(stored)
         assert secret.encode() not in database.read_bytes()

@@ -149,6 +149,50 @@ def test_dashboard_formats_failure_diagnostics_and_redacts_patch(monkeypatch) ->
     assert "[REDACTED]" in formatted["patch_diff"]
 
 
+def test_dashboard_and_replay_format_contract_selected_finding_and_patch() -> None:
+    event = TraceEvent(
+        "report-run",
+        2,
+        "agent_end",
+        "2026-08-18T01:00:01+00:00",
+        {
+            "status": "ok",
+            "diagnostics": {
+                "failure_type": None,
+                "failure_phase": None,
+                "returncode": 0,
+                "analysis_summary": "One finding and one complete contract.",
+                "selected_finding": {"id": "finding-1", "title": "Boundary"},
+                "behavioral_contract": {
+                    "must_fix": ["Accept the boundary."],
+                    "must_preserve": ["Keep smaller values valid."],
+                    "evidence": ["All smaller-value tests pass."],
+                    "rationale": "Preserve the passing behavior.",
+                },
+                "patch_diff": "-before\n+after\n",
+                "patch_applied": True,
+                "verification_failed": False,
+                "verification_output": "5 passed",
+                "rollback_attempted": False,
+                "rollback_succeeded": None,
+                "final_status": "kept",
+            },
+        },
+    )
+
+    formatted = failure_diagnostics_for_display((event,))
+
+    assert formatted is not None
+    assert formatted["failure_type"] == "NONE"
+    assert formatted["selected_finding"]["id"] == "finding-1"
+    assert formatted["behavioral_contract"]["must_preserve"] == [
+        "Keep smaller values valid."
+    ]
+    assert formatted["patch_diff"] == "-before\n+after\n"
+    assert formatted["verification_output"] == "5 passed"
+    assert formatted["rollback_result"] == "NOT ATTEMPTED"
+
+
 def test_legacy_trace_without_diagnostics_is_compatible() -> None:
     legacy = TraceEvent(
         "legacy-run",

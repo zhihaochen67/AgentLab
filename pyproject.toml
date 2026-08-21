@@ -31,3 +31,8 @@ testpaths = ["tests"]
 norecursedirs = ["fixtures"]
 pythonpath = ["."]
 addopts = ["-p", "no:cacheprovider"]
+
+[tool.ruff]
+exclude = [
+    "fixtures/*",
+]

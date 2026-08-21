@@ -45,6 +45,9 @@ RECENT_RUN_LIMIT = 10
 DASHBOARD_RUN_LIMIT = 500
 LONG_TEXT_FIELDS = {"stdout", "stderr"}
 DIAGNOSTIC_LONG_FIELDS = (
+    "analysis_summary",
+    "selected_finding",
+    "behavioral_contract",
     "verification_output",
     "patch_diff",
     "stdout_summary",
@@ -409,7 +412,7 @@ def render_replay_event(event: ReplayEventView) -> None:
 
 
 def render_failure_diagnostics(diagnostics: dict) -> None:
-    st.subheader("Failure Diagnostics")
+    st.subheader("Repair Diagnostics")
     first, second, third = st.columns(3)
     first.write("**Failure Type**")
     first.write(diagnostics["failure_type"])
@@ -439,6 +442,9 @@ def render_failure_diagnostics(diagnostics: dict) -> None:
     )
 
     labels = {
+        "analysis_summary": "Analysis Summary",
+        "selected_finding": "Selected Finding",
+        "behavioral_contract": "Behavioral Contract",
         "verification_output": "Verification Output",
         "patch_diff": "Patch / Diff",
         "stdout_summary": "Agent stdout summary",
@@ -448,7 +454,10 @@ def render_failure_diagnostics(diagnostics: dict) -> None:
         value = diagnostics.get(key)
         if value:
             with st.expander(labels[key], expanded=False):
-                st.text(str(value))
+                if isinstance(value, (dict, list)):
+                    st.json(value)
+                else:
+                    st.text(str(value))
 
 
 def replay_cursor(storage_key: str, trace: ReplayTrace) -> ReplayState:

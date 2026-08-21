@@ -26,6 +26,14 @@ class FakeExperimentAdapter(AgentAdapter):
         return AgentPreflightResult(model="fake-model")
 
 
+class CandidateExperimentAdapter(FakeExperimentAdapter):
+    def trace_metadata(self) -> dict[str, str]:
+        return {
+            "agent_version": "repo-doctor-0.2.0",
+            "prompt_variant": "candidate-v2",
+        }
+
+
 class SequenceEvaluator:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -124,6 +132,46 @@ def test_experiment_ids_are_unique_uuids() -> None:
     assert first != second
     assert str(UUID(first)) == first
     assert str(UUID(second)) == second
+
+
+def test_experiment_metadata_defaults_to_actual_adapter_variant() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-experiment-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+        execution = run_experiment(
+            cases=[EvalCase("case-a", "repository-a", "Fix A")],
+            dataset="dataset.yaml",
+            storage=storage,
+            adapter=CandidateExperimentAdapter(),
+            trials_per_case=1,
+            evaluator=lambda case, _adapter: make_result(
+                case.id,
+                passed=True,
+                latency=1.0,
+            ),
+            validator=lambda _cases: None,
+        )
+
+    assert execution.experiment.agent_version == "repo-doctor-0.2.0"
+    assert execution.experiment.prompt_variant == "candidate-v2"
+
+
+def test_experiment_rejects_metadata_that_differs_from_adapter_variant() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-experiment-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+
+        with pytest.raises(ValueError, match="does not match adapter prompt_variant"):
+            run_experiment(
+                cases=[EvalCase("case-a", "repository-a", "Fix A")],
+                dataset="dataset.yaml",
+                storage=storage,
+                adapter=CandidateExperimentAdapter(),
+                trials_per_case=1,
+                prompt_variant="baseline-v1",
+                evaluator=lambda *_args: pytest.fail("evaluation must not run"),
+                validator=lambda _cases: None,
+            )
+
+        assert storage.list_experiments() == ()
 
 
 def test_trials_filter_persistence_continuation_and_aggregates() -> None:

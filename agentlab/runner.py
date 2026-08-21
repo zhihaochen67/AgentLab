@@ -117,7 +117,16 @@ def _run_traced_agent(
     tracer: Tracer,
 ) -> AgentRunResult | None:
     adapter_name = type(adapter).__name__
-    tracer.emit("agent_start", adapter=adapter_name, workspace=workspace)
+    metadata = {
+        **adapter.trace_metadata(),
+        "task_provided": bool(task.strip()),
+    }
+    tracer.emit(
+        "agent_start",
+        adapter=adapter_name,
+        workspace=workspace,
+        **metadata,
+    )
     started_at = tracer.start_timer()
     try:
         result = adapter.repair(workspace, task)
@@ -126,6 +135,7 @@ def _run_traced_agent(
             "adapter": adapter_name,
             "status": "error",
             "elapsed_time": _elapsed(tracer, started_at),
+            **metadata,
         }
         if isinstance(error, AgentExecutionError):
             data.update(_agent_result_data(error.result))
@@ -136,6 +146,7 @@ def _run_traced_agent(
         adapter=adapter_name,
         status="ok",
         elapsed_time=_elapsed(tracer, started_at),
+        **metadata,
         **_agent_result_data(result),
     )
     return result

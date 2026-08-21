@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentlab.adapters import RepoDoctorAdapter
+from agentlab.adapters.repo_doctor import DEFAULT_PROMPT_VARIANT
 from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
@@ -184,8 +185,7 @@ def run_experiment_command(
         typer.Option(
             "--prompt-variant",
             help=(
-                "Prompt variant identifier recorded as metadata; current Repo Doctor "
-                "does not expose prompt selection."
+                "Repo Doctor prompt variant to execute and record with the experiment."
             ),
         ),
     ] = None,
@@ -204,16 +204,20 @@ def run_experiment_command(
     """Run a persisted repeated-trial evaluation experiment."""
     cases = load_dataset(dataset, validate_initial_state=False)
     storage = _open_storage()
+    effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
     try:
         execution = run_experiment(
             cases=cases,
             dataset=dataset,
             storage=storage,
-            adapter=RepoDoctorAdapter(),
+            adapter=RepoDoctorAdapter(
+                prompt_variant=effective_prompt_variant,
+                agent_version=agent_version,
+            ),
             trials_per_case=trials,
             label=label,
             agent_version=agent_version,
-            prompt_variant=prompt_variant,
+            prompt_variant=effective_prompt_variant,
             notes=notes,
             case_ids=case_ids,
         )
@@ -583,7 +587,11 @@ def _render_failure_diagnostics(events: Sequence[TraceEvent]) -> None:
             item
             for event in reversed(events)
             if (item := diagnostics_from_trace_data(event.data))
-            and item.get("failure_type")
+            and (
+                item.get("failure_type")
+                or item.get("behavioral_contract") is not None
+                or item.get("selected_finding") is not None
+            )
         ),
         None,
     )
@@ -591,7 +599,7 @@ def _render_failure_diagnostics(events: Sequence[TraceEvent]) -> None:
         return
 
     console.print()
-    console.print("[bold red]Failure Diagnostics[/bold red]")
+    console.print("[bold]Repair Diagnostics[/bold]")
     table = Table(box=None, pad_edge=False, show_header=False)
     table.add_column("Field", style="bold")
     table.add_column("Value")
@@ -610,6 +618,9 @@ def _render_failure_diagnostics(events: Sequence[TraceEvent]) -> None:
         table.add_row(label, "not available" if value is None else str(value))
     console.print(table)
     for label, key in (
+        ("Analysis Summary", "analysis_summary"),
+        ("Selected Finding", "selected_finding"),
+        ("Behavioral Contract", "behavioral_contract"),
         ("Verification Output", "verification_output"),
         ("Patch / Diff", "patch_diff"),
     ):

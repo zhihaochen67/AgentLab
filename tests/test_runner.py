@@ -56,6 +56,15 @@ class CalculateTotalAdapter(AgentAdapter):
         return AgentRunResult(0, "fixed inventory.py", "")
 
 
+class MetadataFixingAdapter(FixingAdapter):
+    def trace_metadata(self) -> dict[str, str]:
+        return {
+            "prompt_variant": "candidate-v2",
+            "agent_version": "repo-doctor-0.2.0",
+            "model": "deepseek-v4-flash",
+        }
+
+
 def make_failing_repository(root: Path) -> Path:
     repository = root / "repository"
     repository.mkdir()
@@ -127,6 +136,26 @@ def test_evaluate_case_runs_before_agent_and_after() -> None:
         assert result.trace[4].data["returncode"] == 0
         assert result.trace[6].data["passed"] is True
         assert result.trace[-1].data["final_status"] == "pass"
+
+
+def test_agent_trace_records_variant_metadata_without_full_prompt() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=MetadataFixingAdapter(),
+        )
+
+    agent_events = [
+        event for event in result.trace if event.event_type in {"agent_start", "agent_end"}
+    ]
+    assert len(agent_events) == 2
+    for event in agent_events:
+        assert event.data["prompt_variant"] == "candidate-v2"
+        assert event.data["agent_version"] == "repo-doctor-0.2.0"
+        assert event.data["model"] == "deepseek-v4-flash"
+        assert event.data["task_provided"] is True
+        assert "system_prompt" not in event.data
 
 
 def test_adapter_failure_records_error_and_cleans_workspace() -> None:

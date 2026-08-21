@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -20,12 +21,16 @@ from agentlab.adapters.base import (
 from agentlab.diagnostics import (
     AgentDiagnostics,
     AgentFailureType,
-    diagnose_repo_doctor,
+    diagnose_repo_doctor_report,
 )
+from agentlab.tracer import summarize_text
 
 WORKSPACE_MARKER = ".agentlab-workspace"
+DEFAULT_PROMPT_VARIANT = "baseline-v1"
 _PYTHON_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py")
 _MIN_API_KEY_LENGTH = 16
+_MAX_REPORT_BYTES = 2_000_000
+_MAX_TASK_TEXT = 8_000
 _API_KEY_PLACEHOLDERS = (
     "api key",
     "your key",
@@ -62,6 +67,12 @@ class RepoDoctorAdapter(AgentAdapter):
 
     executable: str = "repo-doctor"
     verification_timeout: int = 120
+    prompt_variant: str = DEFAULT_PROMPT_VARIANT
+    agent_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.prompt_variant.strip():
+            raise ValueError("Repo Doctor prompt_variant must be non-empty.")
 
     def preflight(self) -> AgentPreflightResult:
         """Require Repo Doctor provider settings without exposing their values."""
@@ -76,13 +87,18 @@ class RepoDoctorAdapter(AgentAdapter):
             raise AgentPreflightError(missing)
         return AgentPreflightResult(model=values["REPO_DOCTOR_MODEL"])
 
-    def repair(self, workspace: Path, task: str) -> AgentRunResult:
-        """Run one Repo Doctor semantic repair in the temporary workspace.
+    def trace_metadata(self) -> dict[str, str]:
+        """Return the exact non-secret variant metadata used by Repo Doctor."""
+        metadata = {"prompt_variant": self.prompt_variant}
+        if self.agent_version is not None:
+            metadata["agent_version"] = self.agent_version
+        model = os.environ.get("REPO_DOCTOR_MODEL", "").strip()
+        if model:
+            metadata["model"] = model
+        return metadata
 
-        Repo Doctor discovers the problem from failed verification output, so its
-        CLI does not accept AgentLab's natural-language task as an argument.
-        """
-        del task
+    def repair(self, workspace: Path, task: str) -> AgentRunResult:
+        """Run one task-aware Repo Doctor repair in the temporary workspace."""
         workspace = self._validated_workspace(workspace)
         executable = shutil.which(self.executable)
         if executable is None:
@@ -101,53 +117,76 @@ class RepoDoctorAdapter(AgentAdapter):
         git_directory = workspace / ".git"
         try:
             self._create_git_baseline(workspace)
-            try:
-                result = subprocess.run(
-                    [
-                        executable,
-                        "fix",
-                        str(workspace),
-                        "--ai",
+            with tempfile.TemporaryDirectory(prefix="agentlab-repo-doctor-") as directory:
+                artifacts = Path(directory)
+                report_path = artifacts / "repair-report.json"
+                command = [
+                    executable,
+                    "fix",
+                    str(workspace),
+                    "--ai",
+                    "--prompt-variant",
+                    self.prompt_variant,
+                ]
+                if task.strip():
+                    task_path = artifacts / "task.txt"
+                    task_path.write_text(
+                        summarize_text(task, limit=_MAX_TASK_TEXT),
+                        encoding="utf-8",
+                    )
+                    command.extend(("--task-file", str(task_path)))
+                command.extend(
+                    (
+                        "--report-json",
+                        str(report_path),
                         "--timeout",
                         str(self.verification_timeout),
-                    ],
-                    cwd=workspace,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                    )
                 )
-            except subprocess.TimeoutExpired as error:
-                stdout = self._process_output(error.stdout)
-                stderr = self._process_output(error.stderr)
-                diagnostics = diagnose_repo_doctor(
-                    None,
-                    stdout,
-                    stderr,
-                    process_timed_out=True,
-                )
-                raise AgentExecutionError(
-                    "Repo Doctor process timed out (timeout)",
-                    AgentRunResult(None, stdout, stderr, diagnostics),
-                ) from error
-            except OSError as error:
-                diagnostics = AgentDiagnostics(
-                    failure_type=AgentFailureType.AGENT_PROCESS_ERROR,
-                    failure_phase="process",
-                    returncode=None,
-                    stderr_summary=str(error),
-                )
-                raise AgentExecutionError(
-                    "Repo Doctor process could not start (agent_process_error)",
-                    AgentRunResult(None, "", str(error), diagnostics),
-                ) from error
+                try:
+                    result = subprocess.run(
+                        command,
+                        cwd=workspace,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    stdout = self._process_output(error.stdout)
+                    stderr = self._process_output(error.stderr)
+                    report = self._read_repair_report(report_path)
+                    diagnostics = diagnose_repo_doctor_report(
+                        report,
+                        None,
+                        stdout,
+                        stderr,
+                        process_timed_out=True,
+                    )
+                    raise AgentExecutionError(
+                        "Repo Doctor process timed out (timeout)",
+                        AgentRunResult(None, stdout, stderr, diagnostics),
+                    ) from error
+                except OSError as error:
+                    diagnostics = AgentDiagnostics(
+                        failure_type=AgentFailureType.AGENT_PROCESS_ERROR,
+                        failure_phase="process",
+                        returncode=None,
+                        stderr_summary=str(error),
+                    )
+                    raise AgentExecutionError(
+                        "Repo Doctor process could not start (agent_process_error)",
+                        AgentRunResult(None, "", str(error), diagnostics),
+                    ) from error
 
-            patch_diff = self._capture_git_diff(workspace)
-            diagnostics = diagnose_repo_doctor(
-                result.returncode,
-                result.stdout,
-                result.stderr,
-                patch_diff=patch_diff,
-            )
+                report = self._read_repair_report(report_path)
+                patch_diff = None if report is not None else self._capture_git_diff(workspace)
+                diagnostics = diagnose_repo_doctor_report(
+                    report,
+                    result.returncode,
+                    result.stdout,
+                    result.stderr,
+                    fallback_patch_diff=patch_diff,
+                )
             agent_result = AgentRunResult(
                 result.returncode,
                 result.stdout,
@@ -194,6 +233,17 @@ class RepoDoctorAdapter(AgentAdapter):
         except OSError:
             return None
         return result.stdout if result.returncode == 0 and result.stdout.strip() else None
+
+    @staticmethod
+    def _read_repair_report(path: Path) -> dict | None:
+        """Load one bounded JSON object; legacy/malformed reports use old diagnostics."""
+        try:
+            if not path.is_file() or path.stat().st_size > _MAX_REPORT_BYTES:
+                return None
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
 
     @staticmethod
     def _validated_workspace(workspace: Path) -> Path:

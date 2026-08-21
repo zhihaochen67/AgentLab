@@ -109,6 +109,17 @@ def run_experiment(
     recorded_agent_version = _optional_metadata(agent_version)
     recorded_prompt_variant = _optional_metadata(prompt_variant)
     recorded_notes = _optional_metadata(notes)
+    adapter_metadata = adapter.trace_metadata()
+    recorded_agent_version = _reconcile_metadata(
+        "agent_version",
+        recorded_agent_version,
+        _optional_metadata(adapter_metadata.get("agent_version")),
+    )
+    recorded_prompt_variant = _reconcile_metadata(
+        "prompt_variant",
+        recorded_prompt_variant,
+        _optional_metadata(adapter_metadata.get("prompt_variant")),
+    )
 
     try:
         preflight = adapter.preflight()
@@ -188,3 +199,15 @@ def _optional_metadata(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _reconcile_metadata(
+    name: str,
+    requested: str | None,
+    actual: str | None,
+) -> str | None:
+    if requested is not None and actual is not None and requested != actual:
+        raise ValueError(
+            f"Experiment {name} {requested!r} does not match adapter {name} {actual!r}."
+        )
+    return actual or requested

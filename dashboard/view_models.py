@@ -301,7 +301,16 @@ def event_data_for_display(event: TraceEvent) -> dict[str, Any]:
 
 def format_failure_diagnostics(data: Any) -> dict[str, Any] | None:
     """Format optional diagnostics for a stable, secret-safe Dashboard view."""
-    if not isinstance(data, Mapping) or not data.get("failure_type"):
+    if not isinstance(data, Mapping):
+        return None
+    repair_fields = (
+        "analysis_summary",
+        "selected_finding",
+        "behavioral_contract",
+        "patch_diff",
+        "final_status",
+    )
+    if not data.get("failure_type") and not any(data.get(key) is not None for key in repair_fields):
         return None
     safe = sanitize_data(data)
     verification_failed = safe.get("verification_failed")
@@ -325,7 +334,7 @@ def format_failure_diagnostics(data: Any) -> dict[str, Any] | None:
 
     return {
         **safe,
-        "failure_type": summarize_text(safe["failure_type"]).upper(),
+        "failure_type": summarize_text(safe.get("failure_type") or "none").upper(),
         "failure_phase": summarize_text(safe.get("failure_phase") or "not available"),
         "patch_applied_display": _boolean_label(safe.get("patch_applied")),
         "verification_result": verification_result,

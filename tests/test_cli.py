@@ -102,6 +102,7 @@ def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
         assert len(experiments) == 1
         assert experiments[0].status == "aborted"
         assert experiments[0].total_runs == 0
+        assert experiments[0].prompt_variant == "baseline-v1"
         assert storage.list_runs() == ()
         assert secret.encode() not in database.read_bytes()
 
