@@ -18,6 +18,11 @@ dependencies = [
     "streamlit"
 ]
 
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
 [project.scripts]
 agentlab = "agentlab.cli:app"
 
