@@ -40,6 +40,7 @@ Instead of evaluating agents only by final answers, AgentLab records the complet
 
 ## Architecture
 
+```text
 Task Dataset
       |
       v
@@ -56,6 +57,7 @@ Trace + Metrics
       |
       v
 Experiment Analysis
+```
 
 ## Repo Doctor Integration
 
@@ -63,6 +65,7 @@ AgentLab can evaluate Repo Doctor as an autonomous coding repair agent.
 
 Example workflow:
 
+```text
 Dataset Task
       |
       v
@@ -76,6 +79,7 @@ Repair Result
       |
       v
 Evaluation Metrics
+```
 
 This allows measuring:
 
@@ -90,3 +94,26 @@ Install dependencies:
 
 ```bash
 uv sync
+```
+
+Run tests:
+
+```bash
+uv run pytest -q
+```
+
+Run lint:
+
+```bash
+uv run ruff check .
+```
+
+## Testing
+
+Current status:
+
+- 98 tests passed
+
+## License
+
+MIT
