@@ -5,7 +5,7 @@ from collections.abc import Callable
 from agentlab.adapters.base import AgentAdapter
 from agentlab.adapters.repo_doctor import RepoDoctorAdapter
 
-AgentFactory = Callable[[], AgentAdapter]
+AgentFactory = Callable[..., AgentAdapter]
 
 
 class AgentRegistry:
@@ -22,12 +22,15 @@ class AgentRegistry:
         """Register an agent adapter factory."""
         self._agents[name] = factory
 
-    def create(self, name: str) -> AgentAdapter:
+    def create(
+        self,
+        name: str,
+        **kwargs,
+    ) -> AgentAdapter:
         """Create an agent adapter by name."""
         if name not in self._agents:
             raise KeyError(f"Unknown agent: {name}")
-
-        return self._agents[name]()
+        return self._agents[name](**kwargs)
 
     def list_agents(self) -> list[str]:
         """Return registered agent names."""

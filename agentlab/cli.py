@@ -5,10 +5,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from agentlab.adapters import (
-    RepoDoctorAdapter,
-    create_default_registry,
-)
+from agentlab.adapters import create_default_registry
 from agentlab.adapters.repo_doctor import DEFAULT_PROMPT_VARIANT
 from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
@@ -232,6 +229,13 @@ def run_experiment_command(
             ),
         ),
     ] = None,
+
+    agent: str = typer.Option(
+        "repo_doctor",
+        "--agent",
+        help="Agent name to evaluate.",
+    ),
+
     notes: Annotated[
         str | None,
         typer.Option("--notes", help="Optional experiment notes."),
@@ -253,7 +257,8 @@ def run_experiment_command(
             cases=cases,
             dataset=dataset,
             storage=storage,
-            adapter=RepoDoctorAdapter(
+            adapter=create_default_registry().create(
+                agent,
                 prompt_variant=effective_prompt_variant,
                 agent_version=agent_version,
             ),
