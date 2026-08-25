@@ -13,6 +13,8 @@ class AgentInfo:
 
     name: str
     description: str = ""
+    agent_type: str = "general"
+    capabilities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

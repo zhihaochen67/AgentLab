@@ -61,22 +61,29 @@ def is_plausible_api_key(value: str | None) -> bool:
     normalized = candidate.casefold().replace("_", " ").replace("-", " ")
     return not any(placeholder in normalized for placeholder in _API_KEY_PLACEHOLDERS)
 
-
 @dataclass(frozen=True)
 class RepoDoctorAdapter(AgentAdapter):
     """Run Repo Doctor's verified AI repair against an AgentLab workspace."""
+
     @property
     def info(self) -> AgentInfo:
         """Return Repo Doctor identity metadata."""
         return AgentInfo(
             name="repo_doctor",
             description="AI coding repair agent evaluated by AgentLab",
+            agent_type="coding-agent",
+            capabilities=(
+                "code-repair",
+                "test-fixing",
+                "repository-analysis",
+            ),
         )
 
     executable: str = "repo-doctor"
     verification_timeout: int = 120
     prompt_variant: str = DEFAULT_PROMPT_VARIANT
     agent_version: str | None = None
+
 
     def __post_init__(self) -> None:
         if not self.prompt_variant.strip():
