@@ -71,6 +71,11 @@ def main():
 @app.command("eval")
 def run_eval(
     dataset: str,
+    agent: str = typer.Option(
+        "repo_doctor",
+        "--agent",
+        help="Agent name to evaluate.",
+    ),
     show_trace: bool = typer.Option(
         False,
         "--show-trace",
@@ -81,6 +86,8 @@ def run_eval(
 
     cases = load_dataset(dataset)
     storage = _open_storage()
+    registry = create_default_registry()
+    selected_adapter = registry.create(agent)
 
     console.print()
     console.print("[bold cyan]AgentLab Evaluation[/bold cyan]")
@@ -100,8 +107,13 @@ def run_eval(
     persistence_failed = False
 
     for case in cases:
-        result = evaluate_case(case)
-        results.append(result)
+        if agent == "repo_doctor":
+            result = evaluate_case(case)
+        else:
+            result = evaluate_case(
+                case,
+                adapter=selected_adapter,
+            )
 
         try:
             storage.save_run(result, dataset)
