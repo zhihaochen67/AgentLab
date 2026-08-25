@@ -12,6 +12,7 @@ from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.experiments import (
     ExperimentAbortedError,
+    ExperimentExecution,
     ExperimentPreflightError,
     run_experiment,
 )
@@ -282,6 +283,81 @@ def run_experiment_command(
         raise typer.Exit(1) from error
     _render_experiment(execution.experiment, execution.metrics)
 
+@app.command("benchmark")
+def run_benchmark(
+    dataset: str,
+    agent: str = typer.Option(
+        "repo_doctor",
+        "--agent",
+        help="Agent name to benchmark.",
+    ),
+    trials: int = typer.Option(
+        3,
+        "--trials",
+        min=1,
+        help="Number of trials per case.",
+    ),
+    label: str | None = typer.Option(
+        None,
+        "--label",
+        help="Benchmark experiment label.",
+    ),
+    agent_version: str | None = typer.Option(
+        None,
+        "--agent-version",
+        help="Agent implementation version.",
+    ),
+    prompt_variant: str | None = typer.Option(
+        None,
+        "--prompt-variant",
+        help="Prompt variant used for evaluation.",
+    ),
+):
+    """Run a benchmark evaluation for one agent."""
+
+    cases = load_dataset(dataset, validate_initial_state=False)
+    storage = _open_storage()
+
+    try:
+        execution: ExperimentExecution = run_experiment(
+            cases=cases,
+            dataset=dataset,
+            storage=storage,
+            adapter=create_default_registry().create(
+            agent,
+            agent_version=agent_version,
+            prompt_variant=prompt_variant,
+        ),
+            trials_per_case=trials,
+            label=label or f"{agent}-benchmark",
+            agent_version=agent_version,
+            prompt_variant=prompt_variant,
+        )
+    except ExperimentPreflightError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    except (ExperimentAbortedError, StorageError, ValueError) as error:
+        console.print(f"[red]Benchmark failed: {error}[/red]")
+        raise typer.Exit(1) from error
+
+    console.print("[bold cyan]Agent Benchmark[/bold cyan]")
+    console.print(f"Agent: {agent}")
+    console.print(f"Experiment: {execution.experiment.experiment_id}")
+    console.print(
+        f"Runs: {execution.metrics.total_runs}"
+    )
+    console.print(
+        f"Passed: {execution.metrics.passed_runs}"
+    )
+    console.print(
+        f"Failed: {execution.metrics.failed_runs}"
+    )
+    console.print(
+        f"Success Rate: {execution.metrics.success_rate:.1f}%"
+    )
+    console.print(
+        f"Average Latency: {execution.metrics.average_latency:.2f}s"
+    )
 
 @app.command("experiments")
 def show_recent_experiments():

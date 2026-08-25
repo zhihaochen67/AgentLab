@@ -3,7 +3,10 @@
 from collections.abc import Callable
 
 from agentlab.adapters.base import AgentAdapter
+
 from agentlab.adapters.repo_doctor import RepoDoctorAdapter
+
+from agentlab.adapters.mock_agent import MockAgentAdapter
 
 AgentFactory = Callable[..., AgentAdapter]
 
@@ -45,6 +48,11 @@ def create_default_registry() -> AgentRegistry:
     registry.register(
         "repo_doctor",
         RepoDoctorAdapter,
+    )
+
+    registry.register(
+        "mock_agent",
+        MockAgentAdapter,
     )
 
     return registry
