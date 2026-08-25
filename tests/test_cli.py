@@ -259,3 +259,42 @@ def test_cli_lists_available_agents() -> None:
     assert result.exit_code == 0
     assert "repo_doctor" in result.stdout
     assert "AI coding repair agent evaluated by AgentLab" in result.stdout
+
+def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-cli-agent-") as directory:
+        database = Path(directory) / "agentlab.db"
+        monkeypatch.setenv("AGENTLAB_DB_PATH", str(database))
+
+        monkeypatch.setattr(
+            "agentlab.cli.load_dataset",
+            lambda _dataset, **_kwargs: [
+                EvalCase("case-a", "unused", "Fix A")
+            ],
+        )
+
+        monkeypatch.setattr(
+            "agentlab.experiments.evaluate_case",
+            lambda *_args, **_kwargs: pytest.fail(
+                "evaluation must not run"
+            ),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "experiment",
+                "dataset.yaml",
+                "--agent",
+                "repo_doctor",
+            ],
+        )
+
+        experiments = SQLiteStorage(database).list_experiments()
+
+        assert result.exit_code == 1
+        assert len(experiments) == 1
+        assert experiments[0].status == "aborted"
