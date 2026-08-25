@@ -246,3 +246,16 @@ def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
         assert "Success Rate:" in shown.stdout
         assert "100.0%" in shown.stdout
         assert "addition" in shown.stdout
+
+def test_cli_lists_available_agents() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "list",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "repo_doctor" in result.stdout
+    assert "AI coding repair agent evaluated by AgentLab" in result.stdout

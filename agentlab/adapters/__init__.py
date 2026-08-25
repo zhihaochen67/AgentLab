@@ -7,6 +7,10 @@ from agentlab.adapters.base import (
     AgentPreflightResult,
     AgentRunResult,
 )
+from agentlab.adapters.registry import (
+    AgentRegistry,
+    create_default_registry,
+)
 from agentlab.adapters.repo_doctor import RepoDoctorAdapter
 from agentlab.diagnostics import AgentDiagnostics, AgentFailureType
 
@@ -17,6 +21,8 @@ __all__ = [
     "AgentFailureType",
     "AgentPreflightError",
     "AgentPreflightResult",
+    "AgentRegistry",
     "AgentRunResult",
     "RepoDoctorAdapter",
+    "create_default_registry",
 ]

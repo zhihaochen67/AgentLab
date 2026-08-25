@@ -5,7 +5,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from agentlab.adapters import RepoDoctorAdapter
+from agentlab.adapters import (
+    RepoDoctorAdapter,
+    create_default_registry,
+)
 from agentlab.adapters.repo_doctor import DEFAULT_PROMPT_VARIANT
 from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
@@ -29,8 +32,36 @@ app = typer.Typer(
     help="Agent evaluation and observability platform."
 )
 
+agents_app = typer.Typer(
+    help="Manage available agents."
+)
+
+app.add_typer(
+    agents_app,
+    name="agents",
+)
+
 console = Console()
 
+@agents_app.command("list")
+def list_agents():
+    """List available agents."""
+
+    registry = create_default_registry()
+
+    table = Table(box=None)
+
+    table.add_column("Name")
+    table.add_column("Description")
+
+    for name in registry.list_agents():
+        agent = registry.create(name)
+        table.add_row(
+            agent.info.name,
+            agent.info.description,
+        )
+
+    console.print(table)
 
 @app.callback()
 def main():

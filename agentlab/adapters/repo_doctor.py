@@ -14,6 +14,7 @@ from pathlib import Path
 from agentlab.adapters.base import (
     AgentAdapter,
     AgentExecutionError,
+    AgentInfo,
     AgentPreflightError,
     AgentPreflightResult,
     AgentRunResult,
@@ -64,6 +65,13 @@ def is_plausible_api_key(value: str | None) -> bool:
 @dataclass(frozen=True)
 class RepoDoctorAdapter(AgentAdapter):
     """Run Repo Doctor's verified AI repair against an AgentLab workspace."""
+    @property
+    def info(self) -> AgentInfo:
+        """Return Repo Doctor identity metadata."""
+        return AgentInfo(
+            name="repo_doctor",
+            description="AI coding repair agent evaluated by AgentLab",
+        )
 
     executable: str = "repo-doctor"
     verification_timeout: int = 120

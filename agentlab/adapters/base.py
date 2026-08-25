@@ -8,6 +8,14 @@ from agentlab.diagnostics import AgentDiagnostics
 
 
 @dataclass(frozen=True)
+class AgentInfo:
+    """Identity metadata for an evaluated agent."""
+
+    name: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class AgentRunResult:
     """Observable result returned by an agent adapter."""
 
@@ -58,7 +66,14 @@ class AgentPreflightError(RuntimeError):
 
 
 class AgentAdapter(ABC):
-    """Apply an agent's repair workflow to an isolated evaluation workspace."""
+    """Apply an agent's workflow to an isolated evaluation workspace."""
+
+    @property
+    def info(self) -> AgentInfo:
+        """Return agent identity metadata."""
+        return AgentInfo(
+            name=self.__class__.__name__,
+        )
 
     @abstractmethod
     def repair(self, workspace: Path, task: str) -> AgentRunResult | None:
