@@ -1,10 +1,9 @@
-from types import SimpleNamespace
-
+from agentlab.models import CaseExperimentMetrics, Experiment, ExperimentMetrics
 from agentlab.reporting import build_experiment_report
 
 
 def test_build_experiment_report() -> None:
-    experiment = SimpleNamespace(
+    experiment = Experiment(
         experiment_id="experiment-report",
         label="Report baseline",
         dataset="dataset.yaml",
@@ -16,26 +15,28 @@ def test_build_experiment_report() -> None:
         status="completed",
         trials_per_case=2,
         total_cases=1,
+        total_runs=2,
         started_at="2026-08-26T00:00:00+00:00",
         finished_at="2026-08-26T00:00:02+00:00",
     )
 
-    case_metrics = SimpleNamespace(
-        case_id="case-a",
+    metrics = ExperimentMetrics(
+        experiment_id="experiment-report",
         total_runs=2,
         passed_runs=1,
         failed_runs=1,
         success_rate=0.5,
         average_latency=0.4,
-    )
-
-    metrics = SimpleNamespace(
-        total_runs=2,
-        passed_runs=1,
-        failed_runs=1,
-        success_rate=0.5,
-        average_latency=0.4,
-        per_case=(case_metrics,),
+        per_case=(
+            CaseExperimentMetrics(
+                case_id="case-a",
+                total_runs=2,
+                passed_runs=1,
+                failed_runs=1,
+                success_rate=0.5,
+                average_latency=0.4,
+            ),
+        ),
         failure_types=(("test_failure", 1),),
     )
 
@@ -45,6 +46,7 @@ def test_build_experiment_report() -> None:
     assert report["experiment"]["agent_version"] == "mock-v1"
     assert report["metrics"]["total_runs"] == 2
     assert report["metrics"]["success_rate"] == 0.5
+    assert report["evaluator_metrics"] == []
 
     assert report["cases"] == [
         {

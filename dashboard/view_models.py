@@ -9,13 +9,15 @@ from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.models import (
     CaseExperimentComparison,
     CaseExperimentMetrics,
+    EvaluatorExperimentMetrics,
+    EvaluatorMetricsComparison,
     Experiment,
     ExperimentComparison,
     ExperimentMetrics,
     FailureTypeComparison,
 )
 from agentlab.replay import event_elapsed, event_status
-from agentlab.storage import StoredRun
+from agentlab.storage import StoredEvaluatorOutcome, StoredRun
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
 
@@ -66,6 +68,41 @@ def run_detail_data(run: StoredRun) -> dict[str, Any]:
         ),
         "trial_index": run.trial_index,
     }
+
+
+def evaluator_outcome_rows(
+    outcomes: Iterable[StoredEvaluatorOutcome],
+) -> list[dict[str, Any]]:
+    """Convert persisted evaluator outcomes into sanitized display rows.
+
+    Scores keep the raw 0.0~1.0 scale; missing values render as "—" so a
+    NULL score is never shown as 0. Feedback and metadata are defensively
+    re-sanitized at this output boundary.
+    """
+    return [
+        {
+            "sequence": outcome.sequence,
+            "evaluator": summarize_text(outcome.evaluator),
+            "status": status_label(outcome.status),
+            "passed": outcome.passed,
+            "score": outcome.score if outcome.score is not None else "—",
+            "feedback": (
+                summarize_text(outcome.feedback)
+                if outcome.feedback is not None
+                else "—"
+            ),
+            "error_type": (
+                summarize_text(outcome.error_type)
+                if outcome.error_type is not None
+                else "—"
+            ),
+            "elapsed_time": (
+                outcome.elapsed_time if outcome.elapsed_time is not None else "—"
+            ),
+            "metadata": sanitize_data(outcome.metadata),
+        }
+        for outcome in outcomes
+    ]
 
 
 def experiment_table_rows(experiments: Iterable[Experiment]) -> list[dict[str, Any]]:
@@ -144,6 +181,35 @@ def experiment_failure_rows(
     ]
 
 
+def experiment_evaluator_rows(
+    evaluator_metrics: Iterable[EvaluatorExperimentMetrics],
+) -> list[dict[str, Any]]:
+    """Convert evaluator experiment metrics into display rows.
+
+    Pass rate and coverage are percentages; scores keep the raw 0.0~1.0
+    scale and missing scores render as "—".
+    """
+    return [
+        {
+            "evaluator": summarize_text(item.evaluator),
+            "evaluated_runs": item.evaluated_runs,
+            "total_outcomes": item.total_outcomes,
+            "coverage_rate": round(item.coverage_rate, 1),
+            "passed": item.passed_outcomes,
+            "failed": item.failed_outcomes,
+            "errors": item.error_outcomes,
+            "pass_rate": round(item.pass_rate, 1),
+            "score_count": item.score_count,
+            "average_score": (
+                item.average_score if item.average_score is not None else "—"
+            ),
+            "min_score": item.min_score if item.min_score is not None else "—",
+            "max_score": item.max_score if item.max_score is not None else "—",
+        }
+        for item in evaluator_metrics
+    ]
+
+
 def comparison_view_data(comparison: ExperimentComparison) -> dict[str, Any]:
     """Create a sanitized, UI-ready experiment comparison view model."""
     baseline = comparison.baseline
@@ -193,6 +259,11 @@ def comparison_view_data(comparison: ExperimentComparison) -> dict[str, Any]:
         },
         "success_rate_delta": round(comparison.success_rate_delta, 1),
         "latency_delta": round(comparison.latency_delta, 3),
+        "evaluator_sets_match": comparison.compatibility.evaluator_sets_match,
+        "common_evaluators": comparison.compatibility.common_evaluators,
+        "baseline_only_evaluators": comparison.compatibility.baseline_only_evaluators,
+        "candidate_only_evaluators": comparison.compatibility.candidate_only_evaluators,
+        "evaluator_metrics": comparison_evaluator_rows(comparison.evaluator_metrics),
         "per_case": comparison_case_rows(comparison.per_case),
         "improvements": comparison_case_rows(
             case for case in comparison.per_case if case.change == "improved"
@@ -274,6 +345,47 @@ def comparison_failure_rows(
             "delta": failure.delta,
         }
         for failure in failure_types
+    ]
+
+
+def comparison_evaluator_rows(
+    evaluator_metrics: Iterable[EvaluatorMetricsComparison],
+) -> list[dict[str, Any]]:
+    """Convert evaluator metrics comparisons into display rows.
+
+    Pass rate / coverage values and their delta are percentages
+    (delta in percentage points); scores keep the raw 0.0~1.0 scale and
+    missing scores render as "—".
+    """
+    return [
+        {
+            "evaluator": summarize_text(row.evaluator),
+            "baseline_evaluated_runs": row.baseline_evaluated_runs,
+            "candidate_evaluated_runs": row.candidate_evaluated_runs,
+            "baseline_coverage_rate": round(row.baseline_coverage_rate, 1),
+            "candidate_coverage_rate": round(row.candidate_coverage_rate, 1),
+            "baseline_pass_rate": round(row.baseline_pass_rate, 1),
+            "candidate_pass_rate": round(row.candidate_pass_rate, 1),
+            "pass_rate_delta": round(row.pass_rate_delta, 1),
+            "baseline_average_score": (
+                row.baseline_average_score
+                if row.baseline_average_score is not None
+                else "—"
+            ),
+            "candidate_average_score": (
+                row.candidate_average_score
+                if row.candidate_average_score is not None
+                else "—"
+            ),
+            "average_score_delta": (
+                row.average_score_delta if row.average_score_delta is not None else "—"
+            ),
+            "baseline_score_count": row.baseline_score_count,
+            "candidate_score_count": row.candidate_score_count,
+            "baseline_error_outcomes": row.baseline_error_outcomes,
+            "candidate_error_outcomes": row.candidate_error_outcomes,
+        }
+        for row in evaluator_metrics
     ]
 
 

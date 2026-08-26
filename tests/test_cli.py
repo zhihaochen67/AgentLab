@@ -7,7 +7,12 @@ from typer.testing import CliRunner
 
 from agentlab.adapters import AgentAdapter, AgentRunResult
 from agentlab.cli import app
-from agentlab.models import EvalCase, Experiment
+from agentlab.models import (
+    CaseExperimentMetrics,
+    EvalCase,
+    Experiment,
+    ExperimentMetrics,
+)
 from agentlab.runner import evaluate_case as run_evaluation
 from agentlab.storage import SQLiteStorage, StorageError
 
@@ -300,46 +305,50 @@ def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
         assert experiments[0].status == "aborted"
 
 def test_cli_report_writes_json_file(monkeypatch, tmp_path) -> None:
-    class ReportExperiment:
-        experiment_id = "experiment-cli"
-        label = "CLI report"
-        dataset = "dataset.yaml"
-        adapter = "MockAgentAdapter"
-        model = None
-        agent_version = "mock-v1"
-        prompt_variant = "baseline"
-        notes = None
-        status = "completed"
-        trials_per_case = 1
-        total_cases = 1
-        started_at = "2026-08-26T00:00:00+00:00"
-        finished_at = "2026-08-26T00:00:01+00:00"
-
-    class ReportCaseMetrics:
-        case_id = "case-a"
-        total_runs = 1
-        passed_runs = 1
-        failed_runs = 0
-        success_rate = 1.0
-        average_latency = 0.25
-
-    class ReportMetrics:
-        total_runs = 1
-        passed_runs = 1
-        failed_runs = 0
-        success_rate = 1.0
-        average_latency = 0.25
-        per_case = (ReportCaseMetrics(),)
-        failure_types = ()
+    experiment = Experiment(
+        experiment_id="experiment-cli",
+        label="CLI report",
+        dataset="dataset.yaml",
+        adapter="MockAgentAdapter",
+        model=None,
+        agent_version="mock-v1",
+        prompt_variant="baseline",
+        notes=None,
+        status="completed",
+        trials_per_case=1,
+        total_cases=1,
+        total_runs=1,
+        started_at="2026-08-26T00:00:00+00:00",
+        finished_at="2026-08-26T00:00:01+00:00",
+    )
+    metrics = ExperimentMetrics(
+        experiment_id="experiment-cli",
+        total_runs=1,
+        passed_runs=1,
+        failed_runs=0,
+        success_rate=1.0,
+        average_latency=0.25,
+        per_case=(
+            CaseExperimentMetrics(
+                case_id="case-a",
+                total_runs=1,
+                passed_runs=1,
+                failed_runs=0,
+                success_rate=1.0,
+                average_latency=0.25,
+            ),
+        ),
+        failure_types=(),
+    )
 
     class ReportStorage:
         def get_experiment(self, experiment_id):
             assert experiment_id == "experiment-cli"
-            return ReportExperiment()
+            return experiment
 
         def get_experiment_metrics(self, experiment_id):
             assert experiment_id == "experiment-cli"
-            return ReportMetrics()
+            return metrics
 
     monkeypatch.setattr(
         "agentlab.cli._open_storage",

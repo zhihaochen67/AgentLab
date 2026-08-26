@@ -27,10 +27,12 @@ from agentlab.tracer import TraceEvent
 from dashboard.view_models import (
     comparison_overall_rows,
     comparison_view_data,
+    evaluator_outcome_rows,
     event_data_for_display,
     event_status,
     experiment_case_rows,
     experiment_detail_data,
+    experiment_evaluator_rows,
     experiment_failure_rows,
     experiment_table_rows,
     failure_diagnostics_for_display,
@@ -141,6 +143,13 @@ def render_run_detail(storage: RunStorage, run_id: str) -> None:
     if diagnostics is not None:
         render_failure_diagnostics(diagnostics)
 
+    outcome_rows = evaluator_outcome_rows(storage.get_evaluator_outcomes(run_id))
+    if outcome_rows:
+        st.subheader("Evaluator Outcomes")
+        st.dataframe(outcome_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No evaluator outcomes recorded for this run.")
+
     st.subheader("Trace")
     st.dataframe(trace_table_rows(events), width="stretch", hide_index=True)
     render_event_details(events)
@@ -239,6 +248,16 @@ def render_experiments(storage: RunStorage) -> None:
         "Average Latency", f"{detail['average_latency']:.2f}s"
     )
 
+    st.subheader("Evaluator Metrics")
+    evaluator_rows = experiment_evaluator_rows(metrics.evaluator_metrics)
+    if evaluator_rows:
+        st.dataframe(evaluator_rows, width="stretch", hide_index=True)
+        st.caption(
+            "Pass rate and coverage are percentages; scores are raw 0.0-1.0."
+        )
+    else:
+        st.caption("No evaluator outcomes recorded for this experiment.")
+
     st.subheader("Per-Case Results")
     case_rows = experiment_case_rows(metrics.per_case)
     if case_rows:
@@ -332,6 +351,22 @@ def render_comparison(storage: RunStorage) -> None:
         width="stretch",
         hide_index=True,
     )
+
+    st.subheader("Evaluator Comparison")
+    if data["evaluator_metrics"]:
+        st.dataframe(
+            data["evaluator_metrics"],
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            "Pass rates and coverage are percentages (deltas in percentage "
+            "points); scores are raw 0.0-1.0."
+        )
+    elif data["baseline_only_evaluators"] or data["candidate_only_evaluators"]:
+        st.info("No directly comparable evaluators between these experiments.")
+    else:
+        st.caption("No evaluator metrics available for these experiments.")
 
     st.subheader("Per-Case Results (Common Cases)")
     if data["per_case"]:

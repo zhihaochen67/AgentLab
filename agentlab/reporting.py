@@ -9,7 +9,30 @@ def build_experiment_report(
     experiment: Experiment,
     metrics: ExperimentMetrics,
 ) -> dict:
-    """Build a JSON-serializable experiment report."""
+    """Build a JSON-serializable experiment report.
+
+    Evaluator metrics are aggregate-only: no feedback, metadata, prompts,
+    or raw judge responses are included. Scores stay on the raw 0.0~1.0
+    scale and missing scores serialize as JSON null.
+    """
+    evaluator_metrics = [
+        {
+            "evaluator": item.evaluator,
+            "total_outcomes": item.total_outcomes,
+            "evaluated_runs": item.evaluated_runs,
+            "passed_outcomes": item.passed_outcomes,
+            "failed_outcomes": item.failed_outcomes,
+            "error_outcomes": item.error_outcomes,
+            "verdict_outcomes": item.verdict_outcomes,
+            "pass_rate": item.pass_rate,
+            "score_count": item.score_count,
+            "average_score": item.average_score,
+            "min_score": item.min_score,
+            "max_score": item.max_score,
+            "coverage_rate": item.coverage_rate,
+        }
+        for item in metrics.evaluator_metrics
+    ]
 
     return {
         "experiment": {
@@ -34,6 +57,7 @@ def build_experiment_report(
             "success_rate": metrics.success_rate,
             "average_latency": metrics.average_latency,
         },
+        "evaluator_metrics": evaluator_metrics,
         "cases": [
             {
                 "case_id": case.case_id,
