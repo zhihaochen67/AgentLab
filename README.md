@@ -2,117 +2,168 @@
 
 Evaluation and observability platform for LLM agents.
 
-AgentLab provides a lightweight framework for benchmarking, tracing, and analyzing autonomous agents through reproducible tasks, execution traces, and experiment comparisons.
+AgentLab is infrastructure for answering the questions that matter when you build on top of LLM agents: *how capable is this agent, which configuration is better, and where does it actually fail?* Instead of judging agents by their final answer alone, AgentLab runs them against reproducible task datasets in isolated workspaces and records the full execution — deterministic test results, structured traces, diagnostics, evaluator verdicts — into a normalized SQLite store that powers experiments, comparisons, reports, and a read-only dashboard.
 
-## Overview
+It is not a demo or a wrapper around one agent: it is an evaluation pipeline with an adapter boundary for integrating explicitly supported agent implementations, a deterministic verification gate, an optional LLM-as-Judge layer, and persistent, queryable results.
 
-AgentLab helps answer:
+## Highlights
 
-- How capable is an AI agent?
-- Which agent configuration performs better?
-- Where does an agent fail during execution?
-- How do different prompts or models affect results?
-
-Instead of evaluating agents only by final answers, AgentLab records the complete execution process and provides structured evaluation.
-
-## Features
-
-- **Agent adapters**
-  - Unified interface for different agent implementations.
-  - Currently supports Repo Doctor evaluation.
-
-- **Benchmark-driven evaluation**
-  - Run agents against reproducible task datasets.
-  - Measure success rate and execution outcomes.
-
-- **Execution traces**
-  - Track agent runs, steps, and results.
-  - Store structured evaluation records.
-
-- **Experiment comparison**
-  - Compare different agents, prompts, or configurations.
-
-- **Diagnostics and observability**
-  - Analyze agent behavior beyond final success/failure.
-
-- **Dashboard visualization**
-  - Explore experiments and evaluation results.
+- **Reproducible benchmarks** — YAML task datasets, isolated per-run workspaces, and a deterministic `pytest before → agent → pytest after` gate.
+- **Agent adapters** — a small registry (`repo_doctor`, `mock_agent`) behind one `AgentAdapter` interface; evaluation, experiments, and benchmarking all share it.
+- **Structured execution traces** — ordered, timestamped `TraceEvent`s per run with per-phase timing, diagnostics, and secret redaction.
+- **Persistent experiments** — repeated trials, per-case aggregates, success rate, latency, and failure taxonomy stored in SQLite.
+- **Experiment comparison** — dataset/case/trial compatibility checks plus success-rate, latency, failure-type, and evaluator deltas.
+- **Evaluator framework** — `PytestEvaluator` and `LLMJudgeEvaluator` behind one `Evaluator` abstraction; evaluators run only after the deterministic gate passes.
+- **LLM-as-Judge** — structured JSON verdicts (passed / score / feedback), normalized `evaluator_outcomes` persistence, and experiment-level evaluator metrics.
+- **Provider-agnostic judge runtime** — a small OpenAI-compatible HTTP transport configured through environment variables; no provider SDK, no automatic retries.
+- **Observability surfaces** — JSON experiment reports, a Streamlit dashboard, historical replay, and CLI inspection commands.
 
 ## Architecture
 
 ```text
-Task Dataset
-      |
-      v
-AgentLab Runner
-      |
-      v
-Agent Adapter
-      |
-      v
-Agent Under Evaluation
-      |
-      v
-Trace + Metrics
-      |
-      v
-Experiment Analysis
+Task Dataset (YAML)
+        │
+        ▼
+Experiment / Evaluation Runner        (fresh isolated workspace per run)
+        │
+        ▼
+Agent Adapter ──► Agent Under Evaluation
+        │
+        ▼
+Deterministic Verification            (pytest before / pytest after)
+        │
+        ▼
+Optional Evaluator                    (runs only when pytest after passes)
+        │                             PytestEvaluator / LLMJudgeEvaluator
+        ▼
+Structured Trace + Run Result + Evaluator Outcome
+        │
+        ▼
+SQLite  (runs · trace_events · experiments · evaluator_outcomes)
+        │
+        ▼
+Metrics · Comparison · JSON Report · Dashboard · Replay
 ```
 
-## Repo Doctor Integration
+Two properties shape the design:
 
-AgentLab can evaluate Repo Doctor as an autonomous coding repair agent.
+- The deterministic pytest gate is authoritative. An optional evaluator (e.g. an LLM judge) can only *further* fail a run — it never rescues a red test suite.
+- Evaluator outcomes are first-class persisted data, not trace JSON parsed on demand. Aggregations and comparisons read the normalized `evaluator_outcomes` table.
 
-Example workflow:
+## Core Concepts
 
-```text
-Dataset Task
-      |
-      v
-AgentLab
-      |
-      v
-Repo Doctor
-      |
-      v
-Repair Result
-      |
-      v
-Evaluation Metrics
-```
+- **Agent Adapter** — the boundary between AgentLab and an agent under evaluation. Adapters implement `repair(workspace, task)` and may contribute identity metadata, preflight validation, and diagnostics.
+- **Eval Case / Dataset** — a task (`repository` + `task` description + expected properties) and a YAML collection of cases. Datasets are validated before evaluation.
+- **Run** — one execution of one case: `pytest before → agent → pytest after`, an optional evaluator, a final `EvalResult`, and a full trace.
+- **Experiment** — repeated independent trials over selected cases with persisted metadata (agent version, prompt variant, notes) and aggregate metrics.
+- **Trace** — the ordered, sanitized event log of a run (`run_start`, pytest phases, `agent_end`, `evaluator_end`, errors, `run_end`) with timestamps and per-phase elapsed time.
+- **Evaluator** — any object implementing `evaluate(workspace, case) -> EvaluationOutcome` (`passed`, `score`, `feedback`, `metadata`).
+- **Evaluator Outcome** — one persisted evaluator execution (`PASS` / `FAIL` / `ERROR`, score on a raw 0.0–1.0 scale, feedback, sanitized metadata, error type, elapsed time).
 
-This allows measuring:
+## Quick Start
 
-- repair success rate
-- verification results
-- execution traces
-- experiment differences
-
-## Development
-
-Install dependencies:
+No API key is required for the local path — `mock_agent` applies deterministic fixes to the bundled benchmark fixtures.
 
 ```bash
 uv sync
+uv run agentlab agents list
 ```
 
-Run tests:
+Run a single-trial experiment on one case of the bundled dataset:
 
 ```bash
-uv run pytest -q
+uv run agentlab experiment datasets/repo_doctor_basic.yaml \
+  --agent mock_agent \
+  --trials 1 \
+  --case calculate_total_001 \
+  --label my-first-baseline
 ```
 
-Run lint:
+The experiment output includes the experiment id. Inspect the persisted results without re-executing the agent:
 
 ```bash
-uv run ruff check .
+uv run agentlab experiments            # recent experiments
+uv run agentlab experiment-show <experiment_id>
+uv run agentlab runs                   # recent runs
+uv run agentlab trace <run_id>         # the stored structured trace
+uv run agentlab report <experiment_id> --output reports/<experiment_id>.json
 ```
 
-## Testing
+Compare two persisted experiments (e.g. after changing `--prompt-variant` or `--agent-version`):
 
-Current status:
+```bash
+uv run agentlab compare <baseline_experiment_id> <candidate_experiment_id>
+```
 
-- 98 tests passed
+The bundled `repo_doctor` agent additionally requires the Repo Doctor CLI on `PATH` plus its own `REPO_DOCTOR_*` provider settings; AgentLab never shares that configuration with any other component.
+
+## LLM-as-Judge
+
+AgentLab includes an optional judge layer for tasks where deterministic tests are not the whole story. The judge runtime uses the OpenAI-compatible chat-completions protocol over plain HTTP, without a vendor SDK. The integration is provider-agnostic by design and has been smoke-tested end to end against DeepSeek's compatible API.
+
+Configuration comes from dedicated environment variables — the agent-under-test provider settings are never reused:
+
+```bash
+export AGENTLAB_JUDGE_API_KEY="<your-key>"
+export AGENTLAB_JUDGE_BASE_URL="https://api.deepseek.com"   # example provider
+export AGENTLAB_JUDGE_MODEL="deepseek-v4-flash"             # example model
+export AGENTLAB_JUDGE_TIMEOUT_SECONDS="60"                  # optional, default 60
+```
+
+Enable the judge on any of the three entry points with `--evaluator llm_judge`:
+
+```bash
+uv run agentlab eval datasets/repo_doctor_basic.yaml --agent mock_agent --evaluator llm_judge
+uv run agentlab experiment datasets/repo_doctor_basic.yaml --agent mock_agent \
+  --trials 1 --case calculate_total_001 --evaluator llm_judge --label judge-trial
+uv run agentlab benchmark datasets/repo_doctor_basic.yaml --agent mock_agent \
+  --trials 3 --evaluator llm_judge
+```
+
+Semantics worth knowing:
+
+- The evaluator runs **only after** the deterministic pytest-after gate passes. A red test suite skips the judge entirely.
+- The judge must return a structured JSON verdict (`passed`, `score` 0.0–1.0, `feedback`, optional `model`). Invalid responses become `ERROR` outcomes with a diagnostic error type.
+- Provider failures (timeouts, network errors, HTTP statuses, malformed bodies) are surfaced as safe, typed errors — never with keys, headers, prompts, or raw response bodies — and are persisted as evaluator `ERROR` outcomes. There is no automatic retry.
+- Every outcome lands in the normalized `evaluator_outcomes` table and feeds experiment-level evaluator metrics (coverage, pass rate, score statistics) and evaluator-aware comparisons.
+
+## Experiments & Comparison
+
+- **Repeated trials** — each selected case runs `N` independent trials; every completed trial is persisted immediately.
+- **Metrics** — totals, success rate, average latency, per-case aggregates, and a failure taxonomy derived from agent diagnostics.
+- **Evaluator metrics** — per-evaluator coverage, verdict pass rate (errors excluded from the denominator), and score statistics on the raw 0.0–1.0 scale.
+- **Comparison** — a pure, deterministic comparison of two persisted experiments with compatibility evidence (dataset, case sets, trials, evaluator sets) and deltas for success rate, latency, failure types, and shared evaluator metrics.
+
+## Observability
+
+- Every run emits an ordered, sanitized trace: phases, statuses, elapsed time, and structured diagnostics for agent failures.
+- Sensitive fields are defensively sanitized and redacted across tracing, persistence, replay, dashboard presentation, and reporting.
+- All data lives in a single SQLite database (default `.agentlab/agentlab.db`, override with `AGENTLAB_DB_PATH`), written atomically per run and safe to open read-only.
+- The dashboard's historical replay view re-renders persisted traces without re-executing anything.
+
+## Dashboard
+
+A read-only Streamlit dashboard is included:
+
+```bash
+uv run streamlit run dashboard/app.py
+```
+
+It renders the overview, runs, run detail (trace viewer and evaluator outcomes), historical replay, experiments (including evaluator metrics), and the comparison view with compatibility warnings. Set `AGENTLAB_DB_PATH` to point it at a specific database.
+
+## Development
+
+```bash
+uv sync                 # install dependencies
+uv run pytest -q        # run the test suite
+uv run ruff check .     # lint
+```
+
+The test suite covers the runner, adapters, tracing, persistence, experiments, comparison, evaluators (including a fully mocked HTTP judge transport), reporting, and dashboard view models. No test requires network access or real provider credentials.
+
+## Project Status
+
+AgentLab is a functional evaluation platform under active development. It runs single-machine, sequential evaluations today: no distributed orchestration, no token/cost tracking, and no automatic agent onboarding — an agent participates through an adapter you write. The deterministic evaluation core, experiment persistence, comparison, and the evaluator pipeline (including the real OpenAI-compatible judge runtime) are implemented and tested.
 
 ## License
 
