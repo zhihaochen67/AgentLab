@@ -14,6 +14,7 @@ from agentlab.adapters import (
     RepoDoctorAdapter,
 )
 from agentlab.adapters.repo_doctor import WORKSPACE_MARKER
+from agentlab.evaluators import EvaluationOutcome, Evaluator
 from agentlab.models import EvalCase, EvalResult
 from agentlab.tracer import Tracer, summarize_text
 
@@ -162,16 +163,61 @@ def _cleanup_workspace(workspace: Path) -> None:
         shutil.rmtree(workspace, onerror=_remove_readonly)
 
 
+def _run_traced_evaluator(
+    evaluator: Evaluator,
+    workspace: Path,
+    case: EvalCase,
+    tracer: Tracer,
+) -> EvaluationOutcome:
+    evaluator_name = type(evaluator).__name__
+
+    tracer.emit(
+        "evaluator_start",
+        evaluator=evaluator_name,
+        case_id=case.id,
+    )
+
+    started_at = tracer.start_timer()
+
+    try:
+        outcome = evaluator.evaluate(workspace, case)
+    except Exception as error:
+        tracer.emit(
+            "evaluator_end",
+            evaluator=evaluator_name,
+            status="error",
+            passed=False,
+            elapsed_time=_elapsed(tracer, started_at),
+            error_type=type(error).__name__,
+        )
+        raise
+
+    tracer.emit(
+        "evaluator_end",
+        evaluator=evaluator_name,
+        status="pass" if outcome.passed else "fail",
+        passed=outcome.passed,
+        score=outcome.score,
+        feedback=summarize_text(outcome.feedback),
+        metadata=outcome.metadata,
+        elapsed_time=_elapsed(tracer, started_at),
+    )
+
+    return outcome
+
+
 def evaluate_case(
     case: EvalCase,
     adapter: AgentAdapter | None = None,
     tracer: Tracer | None = None,
+    evaluator: Evaluator | None = None,
 ) -> EvalResult:
     active_tracer = tracer or Tracer()
     active_adapter = adapter or RepoDoctorAdapter()
     workspace: Path | None = None
     before_passed = False
     after_passed = False
+    evaluator_passed = True
     error_message: str | None = None
     phase = "workspace"
 
@@ -196,6 +242,16 @@ def evaluate_case(
         phase = "pytest_after"
         after_result = _run_traced_pytest(workspace, active_tracer, phase)
         after_passed = after_result.passed
+
+        if evaluator is not None and after_passed:
+            phase = "evaluator"
+            evaluator_outcome = _run_traced_evaluator(
+                evaluator,
+                workspace,
+                case,
+                active_tracer,
+            )
+            evaluator_passed = evaluator_outcome.passed
 
     except Exception as error:  # noqa: BLE001 - evaluation errors become trace evidence.
         error_message = summarize_text(error)
@@ -233,7 +289,7 @@ def evaluate_case(
                 else:
                     error_message = f"Workspace cleanup failed: {cleanup_message}"
 
-        passed = error_message is None and after_passed
+        passed = error_message is None and after_passed and evaluator_passed
         active_tracer.emit(
             "run_end",
             case_id=case.id,
@@ -246,7 +302,7 @@ def evaluate_case(
 
     return EvalResult(
         case_id=case.id,
-        passed=error_message is None and after_passed,
+        passed=error_message is None and after_passed and evaluator_passed,
         tests_before_passed=before_passed,
         tests_after_passed=after_passed,
         error=error_message,

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agentlab.adapters import AgentAdapter, AgentRunResult
 from agentlab.dataset import load_dataset
+from agentlab.evaluators import EvaluationOutcome, Evaluator, LLMJudgeEvaluator
 from agentlab.models import EvalCase
 from agentlab.runner import create_workspace, evaluate_case
 
@@ -236,3 +237,267 @@ def test_evaluation_does_not_modify_original_fixture() -> None:
     assert result.tests_before_passed is False
     assert result.tests_after_passed is True
     assert before == after
+
+def test_optional_evaluator_can_reject_green_test_suite() -> None:
+    class RejectingEvaluator:
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            assert workspace.exists()
+            assert case.id == "addition"
+
+            return EvaluationOutcome(
+                passed=False,
+                score=0.25,
+                feedback="Semantic requirements were not satisfied.",
+                metadata={"evaluator": "rejecting-test"},
+            )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=RejectingEvaluator(),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert result.error is None
+
+    evaluator_events = [
+        event
+        for event in result.trace
+        if event.event_type in {"evaluator_start", "evaluator_end"}
+    ]
+
+    assert len(evaluator_events) == 2
+    assert evaluator_events[1].data["status"] == "fail"
+    assert evaluator_events[1].data["passed"] is False
+    assert evaluator_events[1].data["score"] == 0.25
+    assert evaluator_events[1].data["feedback"] == (
+        "Semantic requirements were not satisfied."
+    )
+    assert evaluator_events[1].data["metadata"] == {"evaluator": "rejecting-test"}
+    assert result.trace[-1].data["final_status"] == "fail"
+
+def test_optional_evaluator_is_skipped_when_tests_fail() -> None:
+    class NoOpAdapter(AgentAdapter):
+        def repair(self, workspace: Path, task: str) -> AgentRunResult:
+            return AgentRunResult(0, "no changes", "")
+
+    class MustNotRunEvaluator:
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            raise AssertionError("evaluator must not run")
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Do not fix addition"),
+            adapter=NoOpAdapter(),
+            evaluator=MustNotRunEvaluator(),
+        )
+
+    assert result.tests_after_passed is False
+    assert result.passed is False
+
+    event_types = [event.event_type for event in result.trace]
+
+    assert "evaluator_start" not in event_types
+    assert "evaluator_end" not in event_types
+    assert result.trace[-1].data["final_status"] == "fail"
+
+
+def test_optional_evaluator_pass_records_verdict_in_trace() -> None:
+    class PassingEvaluator(Evaluator):
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            return EvaluationOutcome(
+                passed=True,
+                score=0.9,
+                feedback="Semantics look good.",
+                metadata={"evaluator": "passing-test", "rubric": "semantic"},
+            )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=PassingEvaluator(),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is True
+    assert result.error is None
+
+    evaluator_events = [
+        event
+        for event in result.trace
+        if event.event_type in {"evaluator_start", "evaluator_end"}
+    ]
+
+    assert len(evaluator_events) == 2
+    assert evaluator_events[0].data["evaluator"] == "PassingEvaluator"
+    assert evaluator_events[1].data["status"] == "pass"
+    assert evaluator_events[1].data["passed"] is True
+    assert evaluator_events[1].data["score"] == 0.9
+    assert evaluator_events[1].data["feedback"] == "Semantics look good."
+    assert evaluator_events[1].data["metadata"] == {
+        "evaluator": "passing-test",
+        "rubric": "semantic",
+    }
+    assert result.trace[-1].data["final_status"] == "pass"
+
+
+def test_evaluator_exception_fails_run_with_diagnostic_trace() -> None:
+    class ExplodingEvaluator(Evaluator):
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            raise RuntimeError("judge exploded")
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=ExplodingEvaluator(),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert result.error == "judge exploded"
+
+    event_types = [event.event_type for event in result.trace]
+    assert event_types == [
+        "run_start",
+        "pytest_before_start",
+        "pytest_before_end",
+        "agent_start",
+        "agent_end",
+        "pytest_after_start",
+        "pytest_after_end",
+        "evaluator_start",
+        "evaluator_end",
+        "error",
+        "run_end",
+    ]
+    assert result.trace[7].data["evaluator"] == "ExplodingEvaluator"
+    assert result.trace[8].data["status"] == "error"
+    assert result.trace[8].data["passed"] is False
+    assert result.trace[8].data["error_type"] == "RuntimeError"
+    assert result.trace[9].data["phase"] == "evaluator"
+    assert result.trace[-1].data["final_status"] == "fail"
+
+
+def test_llm_judge_evaluator_pass_verdict_passes_run() -> None:
+    judge = ScriptedJudge(
+        '{"passed": true, "score": 1.0, "feedback": "all good", "model": "mock-llm-1"}'
+    )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=LLMJudgeEvaluator(judge, judge_name="mock-judge"),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is True
+    assert result.error is None
+
+    evaluator_end = next(
+        event for event in result.trace if event.event_type == "evaluator_end"
+    )
+    assert evaluator_end.data["status"] == "pass"
+    assert evaluator_end.data["score"] == 1.0
+    assert evaluator_end.data["feedback"] == "all good"
+    assert evaluator_end.data["metadata"]["judge"] == "mock-judge"
+    assert evaluator_end.data["metadata"]["model"] == "mock-llm-1"
+    assert evaluator_end.data["metadata"]["evidence_files"] > 0
+    assert result.trace[-1].data["final_status"] == "pass"
+
+
+def test_llm_judge_evaluator_fail_verdict_fails_run() -> None:
+    judge = ScriptedJudge(
+        '{"passed": false, "score": 0.2, "feedback": "wrong semantics"}'
+    )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=LLMJudgeEvaluator(judge, judge_name="mock-judge"),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert result.error is None
+    assert result.trace[-1].data["final_status"] == "fail"
+
+
+def test_invalid_judge_response_fails_run_diagnostically() -> None:
+    judge = ScriptedJudge("{not valid json")
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=LLMJudgeEvaluator(judge, judge_name="mock-judge"),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert result.error is not None
+    assert "invalid JSON" in result.error
+
+    error_event = next(
+        event for event in result.trace if event.event_type == "error"
+    )
+    assert error_event.data["phase"] == "evaluator"
+    assert error_event.data["error_type"] == "JudgeResponseError"
+    assert result.trace[-1].data["final_status"] == "fail"
+
+
+def test_evaluator_trace_redacts_judge_secrets(monkeypatch) -> None:
+    secret = "judge-secret-value-98765"
+    monkeypatch.setenv("JUDGE_API_KEY", secret)
+
+    class SecretLeakingEvaluator(Evaluator):
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            return EvaluationOutcome(
+                passed=False,
+                score=0.0,
+                feedback=f"Authorization: Bearer {secret} and api_key={secret}",
+                metadata={"rubric": f"leaked {secret}", "api_key": secret},
+            )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=SecretLeakingEvaluator(),
+        )
+
+    rendered_trace = repr(result.trace)
+    assert secret not in rendered_trace
+    assert "[REDACTED]" in rendered_trace
+    assert result.passed is False
+
+
+class ScriptedJudge:
+    """Mock LLM judge that returns a canned response."""
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+
+    def __call__(self, prompt: str) -> str:
+        return self.response
