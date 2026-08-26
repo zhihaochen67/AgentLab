@@ -3,10 +3,8 @@
 from collections.abc import Callable
 
 from agentlab.adapters.base import AgentAdapter
-
-from agentlab.adapters.repo_doctor import RepoDoctorAdapter
-
 from agentlab.adapters.mock_agent import MockAgentAdapter
+from agentlab.adapters.repo_doctor import RepoDoctorAdapter
 
 AgentFactory = Callable[..., AgentAdapter]
 

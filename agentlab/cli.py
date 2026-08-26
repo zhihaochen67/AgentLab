@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -22,6 +23,7 @@ from agentlab.models import (
     ExperimentComparison,
     ExperimentMetrics,
 )
+from agentlab.reporting import build_experiment_report
 from agentlab.runner import evaluate_case
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
@@ -403,6 +405,53 @@ def show_experiment(experiment_id: str):
     metrics = storage.get_experiment_metrics(experiment_id)
     _render_experiment(experiment, metrics)
 
+@app.command("report")
+def generate_report(
+    experiment_id: str,
+    output: str | None = typer.Option(
+        None,
+        "--output",
+        help="Write report JSON to file.",
+    ),
+):
+    """Generate a JSON report for one experiment."""
+    import json
+
+    storage = _open_storage(read_only=True)
+
+    experiment = storage.get_experiment(experiment_id)
+    if experiment is None:
+        console.print(
+            f"[red]Experiment not found: {experiment_id}[/red]"
+        )
+        raise typer.Exit(1)
+
+    metrics = storage.get_experiment_metrics(experiment_id)
+
+    report = build_experiment_report(
+        experiment,
+        metrics,
+    )
+
+    report_json = json.dumps(
+        report,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        output_path.write_text(
+            report_json,
+            encoding="utf-8",
+        )
+        console.print(f"Report written to {output_path}")
+    else:
+        console.print_json(report_json)
 
 @app.command("compare")
 def compare_experiment_command(

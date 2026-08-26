@@ -298,3 +298,72 @@ def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
         assert result.exit_code == 1
         assert len(experiments) == 1
         assert experiments[0].status == "aborted"
+
+def test_cli_report_writes_json_file(monkeypatch, tmp_path) -> None:
+    class ReportExperiment:
+        experiment_id = "experiment-cli"
+        label = "CLI report"
+        dataset = "dataset.yaml"
+        adapter = "MockAgentAdapter"
+        model = None
+        agent_version = "mock-v1"
+        prompt_variant = "baseline"
+        notes = None
+        status = "completed"
+        trials_per_case = 1
+        total_cases = 1
+        started_at = "2026-08-26T00:00:00+00:00"
+        finished_at = "2026-08-26T00:00:01+00:00"
+
+    class ReportCaseMetrics:
+        case_id = "case-a"
+        total_runs = 1
+        passed_runs = 1
+        failed_runs = 0
+        success_rate = 1.0
+        average_latency = 0.25
+
+    class ReportMetrics:
+        total_runs = 1
+        passed_runs = 1
+        failed_runs = 0
+        success_rate = 1.0
+        average_latency = 0.25
+        per_case = (ReportCaseMetrics(),)
+        failure_types = ()
+
+    class ReportStorage:
+        def get_experiment(self, experiment_id):
+            assert experiment_id == "experiment-cli"
+            return ReportExperiment()
+
+        def get_experiment_metrics(self, experiment_id):
+            assert experiment_id == "experiment-cli"
+            return ReportMetrics()
+
+    monkeypatch.setattr(
+        "agentlab.cli._open_storage",
+        lambda **_kwargs: ReportStorage(),
+    )
+
+    output_path = tmp_path / "reports" / "result.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "report",
+            "experiment-cli",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Report written to" in result.stdout
+    assert output_path.exists()
+
+    report_text = output_path.read_text(encoding="utf-8")
+    assert '"id": "experiment-cli"' in report_text
+    assert '"label": "CLI report"' in report_text
+    assert '"total_runs": 1' in report_text
+    assert '"case_id": "case-a"' in report_text
