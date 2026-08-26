@@ -9,6 +9,8 @@ from agentlab.models import (
     CaseExperimentMetrics,
     ComparisonChange,
     ComparisonCompatibility,
+    EvaluatorExperimentMetrics,
+    EvaluatorMetricsComparison,
     Experiment,
     ExperimentComparison,
     ExperimentComparisonSummary,
@@ -60,11 +62,19 @@ def build_experiment_comparison(
 
     baseline_cases = {case.case_id: case for case in baseline_metrics.per_case}
     candidate_cases = {case.case_id: case for case in candidate_metrics.per_case}
+    baseline_evaluators = {
+        metrics.evaluator for metrics in baseline_metrics.evaluator_metrics
+    }
+    candidate_evaluators = {
+        metrics.evaluator for metrics in candidate_metrics.evaluator_metrics
+    }
     compatibility = _compatibility(
         baseline,
         baseline_cases,
         candidate,
         candidate_cases,
+        baseline_evaluators,
+        candidate_evaluators,
     )
     per_case = tuple(
         _compare_case(baseline_cases[case_id], candidate_cases[case_id])
@@ -86,6 +96,20 @@ def build_experiment_comparison(
         for failure_type in sorted(baseline_failures.keys() | candidate_failures.keys())
     )
 
+    baseline_by_evaluator = {
+        metrics.evaluator: metrics for metrics in baseline_metrics.evaluator_metrics
+    }
+    candidate_by_evaluator = {
+        metrics.evaluator: metrics for metrics in candidate_metrics.evaluator_metrics
+    }
+    evaluator_metrics = tuple(
+        _compare_evaluator(
+            baseline_by_evaluator[evaluator],
+            candidate_by_evaluator[evaluator],
+        )
+        for evaluator in compatibility.common_evaluators
+    )
+
     return ExperimentComparison(
         baseline=_summary(baseline, baseline_metrics),
         candidate=_summary(candidate, candidate_metrics),
@@ -98,6 +122,38 @@ def build_experiment_comparison(
         compatibility=compatibility,
         per_case=per_case,
         failure_types=failure_types,
+        evaluator_metrics=evaluator_metrics,
+    )
+
+
+def _compare_evaluator(
+    baseline: EvaluatorExperimentMetrics,
+    candidate: EvaluatorExperimentMetrics,
+) -> EvaluatorMetricsComparison:
+    """Compare evaluator metrics for one evaluator name shared by both sides."""
+    average_score_delta: float | None
+    if baseline.average_score is None or candidate.average_score is None:
+        average_score_delta = None
+    else:
+        average_score_delta = candidate.average_score - baseline.average_score
+    return EvaluatorMetricsComparison(
+        evaluator=baseline.evaluator,
+        baseline_total_outcomes=baseline.total_outcomes,
+        candidate_total_outcomes=candidate.total_outcomes,
+        baseline_evaluated_runs=baseline.evaluated_runs,
+        candidate_evaluated_runs=candidate.evaluated_runs,
+        baseline_coverage_rate=baseline.coverage_rate,
+        candidate_coverage_rate=candidate.coverage_rate,
+        baseline_pass_rate=baseline.pass_rate,
+        candidate_pass_rate=candidate.pass_rate,
+        pass_rate_delta=candidate.pass_rate - baseline.pass_rate,
+        baseline_average_score=baseline.average_score,
+        candidate_average_score=candidate.average_score,
+        average_score_delta=average_score_delta,
+        baseline_score_count=baseline.score_count,
+        candidate_score_count=candidate.score_count,
+        baseline_error_outcomes=baseline.error_outcomes,
+        candidate_error_outcomes=candidate.error_outcomes,
     )
 
 
@@ -128,12 +184,18 @@ def _compatibility(
     baseline_cases: dict[str, CaseExperimentMetrics],
     candidate: Experiment,
     candidate_cases: dict[str, CaseExperimentMetrics],
+    baseline_evaluators: set[str],
+    candidate_evaluators: set[str],
 ) -> ComparisonCompatibility:
     baseline_case_ids = set(baseline_cases)
     candidate_case_ids = set(candidate_cases)
     common = tuple(sorted(baseline_case_ids & candidate_case_ids))
     baseline_only = tuple(sorted(baseline_case_ids - candidate_case_ids))
     candidate_only = tuple(sorted(candidate_case_ids - baseline_case_ids))
+    common_evaluators = tuple(sorted(baseline_evaluators & candidate_evaluators))
+    baseline_only_evaluators = tuple(sorted(baseline_evaluators - candidate_evaluators))
+    candidate_only_evaluators = tuple(sorted(candidate_evaluators - baseline_evaluators))
+    evaluator_sets_match = baseline_evaluators == candidate_evaluators
     baseline_complete = len(baseline_case_ids) == baseline.total_cases
     candidate_complete = len(candidate_case_ids) == candidate.total_cases
     dataset_matches = baseline.dataset == candidate.dataset
@@ -168,6 +230,13 @@ def _compatibility(
             f"baseline={baseline.trials_per_case}, "
             f"candidate={candidate.trials_per_case}."
         )
+    if not evaluator_sets_match:
+        details = []
+        if baseline_only_evaluators:
+            details.append(f"baseline-only={', '.join(baseline_only_evaluators)}")
+        if candidate_only_evaluators:
+            details.append(f"candidate-only={', '.join(candidate_only_evaluators)}")
+        warnings.append(f"Evaluator mismatch: {'; '.join(details)}.")
     if baseline.status not in COMPARABLE_STATUSES:
         warnings.append(
             f"Baseline experiment status is {baseline.status!r}; results may be incomplete."
@@ -188,6 +257,10 @@ def _compatibility(
         baseline_only_case_ids=baseline_only,
         candidate_only_case_ids=candidate_only,
         warnings=tuple(warnings),
+        evaluator_sets_match=evaluator_sets_match,
+        common_evaluators=common_evaluators,
+        baseline_only_evaluators=baseline_only_evaluators,
+        candidate_only_evaluators=candidate_only_evaluators,
     )
 
 

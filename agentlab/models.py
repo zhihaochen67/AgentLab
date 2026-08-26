@@ -61,6 +61,25 @@ class CaseExperimentMetrics:
 
 
 @dataclass(frozen=True)
+class EvaluatorExperimentMetrics:
+    """Aggregate evaluator outcomes for one evaluator within an experiment."""
+
+    evaluator: str
+    total_outcomes: int
+    evaluated_runs: int
+    passed_outcomes: int
+    failed_outcomes: int
+    error_outcomes: int
+    verdict_outcomes: int
+    pass_rate: float
+    score_count: int
+    average_score: float | None
+    min_score: float | None
+    max_score: float | None
+    coverage_rate: float
+
+
+@dataclass(frozen=True)
 class ExperimentMetrics:
     """Aggregate results calculated from persisted experiment runs."""
 
@@ -72,6 +91,7 @@ class ExperimentMetrics:
     average_latency: float
     per_case: tuple[CaseExperimentMetrics, ...]
     failure_types: tuple[tuple[str, int], ...]
+    evaluator_metrics: tuple[EvaluatorExperimentMetrics, ...] = ()
 
 
 ComparisonChange = Literal["improved", "regressed", "unchanged"]
@@ -103,6 +123,10 @@ class ComparisonCompatibility:
     baseline_only_case_ids: tuple[str, ...]
     candidate_only_case_ids: tuple[str, ...]
     warnings: tuple[str, ...]
+    evaluator_sets_match: bool = True
+    common_evaluators: tuple[str, ...] = ()
+    baseline_only_evaluators: tuple[str, ...] = ()
+    candidate_only_evaluators: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +155,33 @@ class FailureTypeComparison:
 
 
 @dataclass(frozen=True)
+class EvaluatorMetricsComparison:
+    """Evaluator-level metrics comparison for one shared evaluator name.
+
+    Note: the same evaluator name is the current comparability boundary;
+    differing models/rubrics behind one name are not detected yet.
+    """
+
+    evaluator: str
+    baseline_total_outcomes: int
+    candidate_total_outcomes: int
+    baseline_evaluated_runs: int
+    candidate_evaluated_runs: int
+    baseline_coverage_rate: float
+    candidate_coverage_rate: float
+    baseline_pass_rate: float
+    candidate_pass_rate: float
+    pass_rate_delta: float
+    baseline_average_score: float | None
+    candidate_average_score: float | None
+    average_score_delta: float | None
+    baseline_score_count: int
+    candidate_score_count: int
+    baseline_error_outcomes: int
+    candidate_error_outcomes: int
+
+
+@dataclass(frozen=True)
 class ExperimentComparison:
     """Pure comparison result built from two persisted experiments."""
 
@@ -141,3 +192,4 @@ class ExperimentComparison:
     compatibility: ComparisonCompatibility
     per_case: tuple[CaseExperimentComparison, ...]
     failure_types: tuple[FailureTypeComparison, ...]
+    evaluator_metrics: tuple[EvaluatorMetricsComparison, ...] = ()

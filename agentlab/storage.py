@@ -16,6 +16,7 @@ from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.models import (
     CaseExperimentMetrics,
     EvalResult,
+    EvaluatorExperimentMetrics,
     Experiment,
     ExperimentMetrics,
 )
@@ -69,6 +70,45 @@ class RunStats:
     failed_runs: int
     success_rate: float
     average_latency: float
+
+
+def _evaluator_experiment_metrics(
+    rows: list[dict[str, Any]],
+    total_runs: int,
+) -> tuple[EvaluatorExperimentMetrics, ...]:
+    """Convert SQL-aggregated evaluator_outcomes rows into metrics.
+
+    Only derived ratios are computed here; every count/statistic comes from
+    SQL aggregation over the evaluator_outcomes table. Scores stay on the
+    raw 0.0~1.0 scale and ERROR outcomes never enter the pass-rate verdict
+    denominator.
+    """
+    metrics: list[EvaluatorExperimentMetrics] = []
+    for row in rows:
+        passed = int(row["passed_outcomes"])
+        failed = int(row["failed_outcomes"])
+        verdict = passed + failed
+        evaluated_runs = int(row["evaluated_runs"])
+        metrics.append(
+            EvaluatorExperimentMetrics(
+                evaluator=row["evaluator"],
+                total_outcomes=int(row["total_outcomes"]),
+                evaluated_runs=evaluated_runs,
+                passed_outcomes=passed,
+                failed_outcomes=failed,
+                error_outcomes=int(row["error_outcomes"]),
+                verdict_outcomes=verdict,
+                pass_rate=(passed / verdict * 100.0) if verdict else 0.0,
+                score_count=int(row["score_count"]),
+                average_score=row["average_score"],
+                min_score=row["min_score"],
+                max_score=row["max_score"],
+                coverage_rate=(
+                    (evaluated_runs / total_runs * 100.0) if total_runs else 0.0
+                ),
+            )
+        )
+    return tuple(metrics)
 
 
 class StorageError(RuntimeError):
@@ -340,6 +380,11 @@ class SQLiteStorage(RunStorage):
         if not isinstance(passed, bool):
             raise ValueError(  # noqa: TRY004 - persisted evaluator data validation.
                 f"{context} is missing a boolean 'passed'."
+            )
+        if (status == "pass") != passed:
+            raise ValueError(
+                f"{context} has inconsistent status/passed: "
+                f"status={status!r} passed={passed!r}."
             )
 
         score = data.get("score")
@@ -834,6 +879,41 @@ class SQLiteStorage(RunStorage):
                     """,
                     (experiment_id,),
                 ).fetchall()
+                evaluator_rows: list[dict[str, Any]] = []
+                if self._table_exists(connection, "evaluator_outcomes"):
+                    evaluator_rows = [
+                        dict(row)
+                        for row in connection.execute(
+                            """
+                            SELECT evaluator,
+                                   COUNT(*) AS total_outcomes,
+                                   COUNT(DISTINCT run_id) AS evaluated_runs,
+                                   COALESCE(
+                                       SUM(CASE WHEN status = 'PASS' THEN 1 ELSE 0 END),
+                                       0
+                                   ) AS passed_outcomes,
+                                   COALESCE(
+                                       SUM(CASE WHEN status = 'FAIL' THEN 1 ELSE 0 END),
+                                       0
+                                   ) AS failed_outcomes,
+                                   COALESCE(
+                                       SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END),
+                                       0
+                                   ) AS error_outcomes,
+                                   COUNT(score) AS score_count,
+                                   AVG(score) AS average_score,
+                                   MIN(score) AS min_score,
+                                   MAX(score) AS max_score
+                            FROM evaluator_outcomes
+                            WHERE run_id IN (
+                                SELECT run_id FROM runs WHERE experiment_id = ?
+                            )
+                            GROUP BY evaluator
+                            ORDER BY evaluator
+                            """,
+                            (experiment_id,),
+                        ).fetchall()
+                    ]
         except sqlite3.Error as error:
             raise StorageError(
                 f"Could not aggregate experiment {experiment_id}: {error}"
@@ -881,6 +961,7 @@ class SQLiteStorage(RunStorage):
             average_latency=(total_latency / total_runs) if total_runs else 0.0,
             per_case=per_case,
             failure_types=tuple(sorted(failure_counts.items())),
+            evaluator_metrics=_evaluator_experiment_metrics(evaluator_rows, total_runs),
         )
 
     @staticmethod
