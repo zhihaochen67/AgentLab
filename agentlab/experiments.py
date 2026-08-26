@@ -10,11 +10,12 @@ from pathlib import Path
 
 from agentlab.adapters import AgentAdapter, AgentPreflightError
 from agentlab.dataset import validate_dataset
+from agentlab.evaluators import Evaluator
 from agentlab.models import EvalCase, EvalResult, Experiment, ExperimentMetrics
 from agentlab.runner import evaluate_case
 from agentlab.storage import RunStorage
 
-ExperimentEvaluator = Callable[[EvalCase, AgentAdapter], EvalResult]
+CaseExecutor = Callable[[EvalCase, AgentAdapter], EvalResult]
 DatasetValidator = Callable[[Sequence[EvalCase]], None]
 Clock = Callable[[], datetime]
 
@@ -88,7 +89,8 @@ def run_experiment(
     prompt_variant: str | None = None,
     notes: str | None = None,
     case_ids: Sequence[str] | None = None,
-    evaluator: ExperimentEvaluator | None = None,
+    evaluator: Evaluator | None = None,
+    case_executor: CaseExecutor | None = None,
     validator: DatasetValidator = validate_dataset,
     experiment_id: str | None = None,
     clock: Clock | None = None,
@@ -96,6 +98,10 @@ def run_experiment(
     """Execute selected cases repeatedly while preserving every completed trial."""
     if trials_per_case < 1:
         raise ValueError("trials_per_case must be at least 1.")
+    if evaluator is not None and case_executor is not None:
+        raise ValueError(
+            "Provide either 'evaluator' or 'case_executor', not both."
+        )
     selected = select_experiment_cases(cases, case_ids)
     if not selected:
         raise ValueError("An experiment requires at least one selected case.")
@@ -164,7 +170,9 @@ def run_experiment(
         notes=recorded_notes,
     )
     storage.create_experiment(running)
-    execute = evaluator or _evaluate
+    execute = case_executor or (
+        lambda case, adapter: _evaluate(case, adapter, evaluator=evaluator)
+    )
     try:
         validator(selected)
         for case in selected:
@@ -186,8 +194,13 @@ def run_experiment(
     return ExperimentExecution(finished, metrics)
 
 
-def _evaluate(case: EvalCase, adapter: AgentAdapter) -> EvalResult:
-    return evaluate_case(case, adapter=adapter)
+def _evaluate(
+    case: EvalCase,
+    adapter: AgentAdapter,
+    *,
+    evaluator: Evaluator | None = None,
+) -> EvalResult:
+    return evaluate_case(case, adapter=adapter, evaluator=evaluator)
 
 
 def _timestamp(clock: Clock) -> str:

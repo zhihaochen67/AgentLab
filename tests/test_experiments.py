@@ -143,7 +143,7 @@ def test_experiment_metadata_defaults_to_actual_adapter_variant() -> None:
             storage=storage,
             adapter=CandidateExperimentAdapter(),
             trials_per_case=1,
-            evaluator=lambda case, _adapter: make_result(
+            case_executor=lambda case, _adapter: make_result(
                 case.id,
                 passed=True,
                 latency=1.0,
@@ -167,7 +167,7 @@ def test_experiment_rejects_metadata_that_differs_from_adapter_variant() -> None
                 adapter=CandidateExperimentAdapter(),
                 trials_per_case=1,
                 prompt_variant="baseline-v1",
-                evaluator=lambda *_args: pytest.fail("evaluation must not run"),
+                case_executor=lambda *_args: pytest.fail("evaluation must not run"),
                 validator=lambda _cases: None,
             )
 
@@ -195,7 +195,7 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
             prompt_variant="baseline-v1",
             notes="repeated-trial baseline",
             case_ids=("case-c", "case-a", "case-a"),
-            evaluator=evaluator,
+            case_executor=evaluator,
             validator=lambda _cases: None,
         )
 
@@ -257,7 +257,7 @@ def test_repo_doctor_preflight_aborts_without_runs_or_secret(monkeypatch) -> Non
                 storage=storage,
                 adapter=RepoDoctorAdapter(),
                 trials_per_case=3,
-                evaluator=forbidden_evaluator,
+                case_executor=forbidden_evaluator,
                 validator=lambda _cases: pytest.fail("validation must not run"),
             )
 
@@ -313,7 +313,7 @@ def test_invalid_api_key_aborts_before_evaluation_repair_or_network(
                 storage=storage,
                 adapter=RepoDoctorAdapter(),
                 trials_per_case=3,
-                evaluator=forbidden_evaluator,
+                case_executor=forbidden_evaluator,
                 validator=lambda _cases: pytest.fail("validation must not run"),
             )
 

@@ -11,6 +11,7 @@ from agentlab.adapters.repo_doctor import DEFAULT_PROMPT_VARIANT
 from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
+from agentlab.evaluators import JudgeConfigurationError, create_evaluator
 from agentlab.experiments import (
     ExperimentAbortedError,
     ExperimentExecution,
@@ -81,8 +82,19 @@ def run_eval(
         "--show-trace",
         help="Show the in-memory structured trace for each evaluation case.",
     ),
+    evaluator: str = typer.Option(
+        "none",
+        "--evaluator",
+        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+    ),
 ):
     """Run an AgentLab evaluation dataset."""
+
+    try:
+        selected_evaluator = create_evaluator(evaluator)
+    except (JudgeConfigurationError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
 
     cases = load_dataset(dataset)
     storage = _open_storage()
@@ -107,12 +119,20 @@ def run_eval(
     persistence_failed = False
 
     for case in cases:
-        if agent == "repo_doctor":
+        if agent == "repo_doctor" and selected_evaluator is None:
             result = evaluate_case(case)
+        elif agent == "repo_doctor":
+            result = evaluate_case(case, evaluator=selected_evaluator)
+        elif selected_evaluator is None:
+            result = evaluate_case(
+                case,
+                adapter=selected_adapter,
+            )
         else:
             result = evaluate_case(
                 case,
                 adapter=selected_adapter,
+                evaluator=selected_evaluator,
             )
 
         try:
@@ -250,8 +270,19 @@ def run_experiment_command(
             help="Run only this case id; repeat the option to select multiple cases.",
         ),
     ] = None,
+    evaluator: str = typer.Option(
+        "none",
+        "--evaluator",
+        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+    ),
 ):
     """Run a persisted repeated-trial evaluation experiment."""
+    try:
+        selected_evaluator = create_evaluator(evaluator)
+    except (JudgeConfigurationError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
     cases = load_dataset(dataset, validate_initial_state=False)
     storage = _open_storage()
     effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
@@ -271,6 +302,7 @@ def run_experiment_command(
             prompt_variant=effective_prompt_variant,
             notes=notes,
             case_ids=case_ids,
+            evaluator=selected_evaluator,
         )
     except ExperimentPreflightError as error:
         console.print(f"[red]{error}[/red]")
@@ -314,11 +346,23 @@ def run_benchmark(
         "--prompt-variant",
         help="Prompt variant used for evaluation.",
     ),
+    evaluator: str = typer.Option(
+        "none",
+        "--evaluator",
+        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+    ),
 ):
     """Run a benchmark evaluation for one agent."""
 
+    try:
+        selected_evaluator = create_evaluator(evaluator)
+    except (JudgeConfigurationError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
     cases = load_dataset(dataset, validate_initial_state=False)
     storage = _open_storage()
+    effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
 
     try:
         execution: ExperimentExecution = run_experiment(
@@ -326,14 +370,15 @@ def run_benchmark(
             dataset=dataset,
             storage=storage,
             adapter=create_default_registry().create(
-            agent,
-            agent_version=agent_version,
-            prompt_variant=prompt_variant,
-        ),
+                agent,
+                agent_version=agent_version,
+                prompt_variant=effective_prompt_variant,
+            ),
             trials_per_case=trials,
             label=label or f"{agent}-benchmark",
             agent_version=agent_version,
-            prompt_variant=prompt_variant,
+            prompt_variant=effective_prompt_variant,
+            evaluator=selected_evaluator,
         )
     except ExperimentPreflightError as error:
         console.print(f"[red]{error}[/red]")

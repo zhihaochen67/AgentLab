@@ -15,7 +15,8 @@ dependencies = [
     "pytest",
     "sqlalchemy",
     "rich",
-    "streamlit"
+    "streamlit",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

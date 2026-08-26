@@ -24,42 +24,14 @@ from agentlab.diagnostics import (
     AgentFailureType,
     diagnose_repo_doctor_report,
 )
+from agentlab.providers import is_plausible_api_key
 from agentlab.tracer import summarize_text
 
 WORKSPACE_MARKER = ".agentlab-workspace"
 DEFAULT_PROMPT_VARIANT = "baseline-v1"
 _PYTHON_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py")
-_MIN_API_KEY_LENGTH = 16
 _MAX_REPORT_BYTES = 2_000_000
 _MAX_TASK_TEXT = 8_000
-_API_KEY_PLACEHOLDERS = (
-    "api key",
-    "your key",
-    "你的",
-    "真实 deepseek",
-    "placeholder",
-    "replace me",
-    "change me",
-    "changeme",
-    "insert key",
-    "paste key",
-    "example key",
-    "dummy key",
-    "test key",
-)
-
-
-def is_plausible_api_key(value: str | None) -> bool:
-    """Reject obviously invalid API keys without assuming a provider format."""
-    if value is None:
-        return False
-    candidate = value.strip()
-    if not candidate or not candidate.isascii():
-        return False
-    if len(candidate) < _MIN_API_KEY_LENGTH:
-        return False
-    normalized = candidate.casefold().replace("_", " ").replace("-", " ")
-    return not any(placeholder in normalized for placeholder in _API_KEY_PLACEHOLDERS)
 
 @dataclass(frozen=True)
 class RepoDoctorAdapter(AgentAdapter):
