@@ -7,6 +7,7 @@ from agentlab.dataset import load_dataset
 from agentlab.evaluators import EvaluationOutcome, Evaluator, LLMJudgeEvaluator
 from agentlab.models import EvalCase
 from agentlab.runner import create_workspace, evaluate_case
+from agentlab.storage import SQLiteStorage
 
 
 class FixingAdapter(AgentAdapter):
@@ -501,3 +502,34 @@ class ScriptedJudge:
 
     def __call__(self, prompt: str) -> str:
         return self.response
+
+
+def test_evaluator_outcome_persists_from_runner_trace() -> None:
+    judge = ScriptedJudge(
+        '{"passed": true, "score": 1.0, "feedback": "all good", "model": "mock-llm-1"}'
+    )
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+        result = evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            evaluator=LLMJudgeEvaluator(judge, judge_name="mock-judge"),
+        )
+        database = Path(directory) / "persist.db"
+        storage = SQLiteStorage(database)
+        storage.save_run(result, "dataset.yaml")
+        outcomes = storage.get_evaluator_outcomes(result.run_id)
+
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert outcome.run_id == result.run_id
+    assert outcome.evaluator == "LLMJudgeEvaluator"
+    assert outcome.status == "PASS"
+    assert outcome.passed is True
+    assert outcome.score == 1.0
+    assert outcome.feedback == "all good"
+    assert outcome.error_type is None
+    assert outcome.metadata["judge"] == "mock-judge"
+    assert outcome.metadata["model"] == "mock-llm-1"
+    assert outcome.metadata["evidence_files"] > 0

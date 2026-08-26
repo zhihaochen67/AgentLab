@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.models import (
@@ -44,6 +45,22 @@ class StoredRun:
 
 
 @dataclass(frozen=True)
+class StoredEvaluatorOutcome:
+    """Immutable persisted outcome of one evaluator execution."""
+
+    run_id: str
+    sequence: int
+    evaluator: str
+    status: str
+    passed: bool
+    score: float | None
+    feedback: str | None
+    metadata: dict[str, Any]
+    error_type: str | None
+    elapsed_time: float | None
+
+
+@dataclass(frozen=True)
 class RunStats:
     """Aggregate read-only statistics for the dashboard overview."""
 
@@ -72,6 +89,10 @@ class RunStorage(ABC):
     @abstractmethod
     def get_trace_events(self, run_id: str) -> tuple[TraceEvent, ...]:
         """Load trace events in stable sequence order."""
+
+    @abstractmethod
+    def get_evaluator_outcomes(self, run_id: str) -> tuple[StoredEvaluatorOutcome, ...]:
+        """Load persisted evaluator outcomes in stable sequence order."""
 
     @abstractmethod
     def list_runs(
@@ -218,6 +239,26 @@ class SQLiteStorage(RunStorage):
 
                 CREATE INDEX IF NOT EXISTS idx_trace_events_run_sequence
                     ON trace_events(run_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS evaluator_outcomes (
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    evaluator TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL', 'ERROR')),
+                    passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
+                    score REAL CHECK (score IS NULL OR (score >= 0.0 AND score <= 1.0)),
+                    feedback TEXT,
+                    metadata_json TEXT NOT NULL,
+                    error_type TEXT,
+                    elapsed_time REAL CHECK (
+                        elapsed_time IS NULL OR elapsed_time >= 0.0
+                    ),
+                    PRIMARY KEY (run_id, sequence),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_evaluator_outcomes_run_sequence
+                    ON evaluator_outcomes(run_id, sequence);
                 """
             )
             self._migrate_experiments_schema(connection)
@@ -260,6 +301,111 @@ class SQLiteStorage(RunStorage):
         if event is None:
             raise ValueError(f"Evaluation trace is missing required event: {event_type}")
         return event
+
+    _EVALUATOR_STATUSES = frozenset({"pass", "fail", "error"})
+
+    @classmethod
+    def _evaluator_outcome_rows(cls, result: EvalResult) -> list[tuple[Any, ...]]:
+        """Extract validated evaluator_outcomes rows from evaluator_end events."""
+        rows: list[tuple[Any, ...]] = []
+        for event in sorted(result.trace, key=lambda item: item.sequence):
+            if event.event_type != "evaluator_end":
+                continue
+            rows.append(cls._validated_evaluator_outcome_row(result.run_id, event))
+        return rows
+
+    @classmethod
+    def _validated_evaluator_outcome_row(
+        cls,
+        run_id: str,
+        event: TraceEvent,
+    ) -> tuple[Any, ...]:
+        """Validate one structured evaluator_end event into a persisted row."""
+        context = f"evaluator_end sequence {event.sequence} for run {run_id}"
+        data = event.data
+
+        evaluator = data.get("evaluator")
+        if not isinstance(evaluator, str) or not evaluator.strip():
+            raise ValueError(f"{context} is missing a non-empty 'evaluator'.")
+
+        raw_status = data.get("status")
+        status = raw_status.lower() if isinstance(raw_status, str) else None
+        if status not in cls._EVALUATOR_STATUSES:
+            raise ValueError(
+                f"{context} has invalid status: {raw_status!r} "
+                "(expected 'pass', 'fail', or 'error')."
+            )
+
+        passed = data.get("passed")
+        if not isinstance(passed, bool):
+            raise ValueError(  # noqa: TRY004 - persisted evaluator data validation.
+                f"{context} is missing a boolean 'passed'."
+            )
+
+        score = data.get("score")
+        if score is not None:
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                raise ValueError(f"{context} has a non-numeric 'score': {score!r}.")
+            if not 0.0 <= float(score) <= 1.0:
+                raise ValueError(
+                    f"{context} score must be within [0.0, 1.0], got {score!r}."
+                )
+            score = float(score)
+
+        feedback = data.get("feedback")
+        if feedback is not None and not isinstance(feedback, str):
+            raise ValueError(f"{context} 'feedback' must be a string when present.")
+
+        metadata = data.get("metadata")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise ValueError(  # noqa: TRY004 - persisted evaluator data validation.
+                f"{context} 'metadata' must be an object, got "
+                f"{type(metadata).__name__}."
+            )
+
+        error_type = data.get("error_type")
+        if error_type is not None and not isinstance(error_type, str):
+            raise ValueError(f"{context} 'error_type' must be a string when present.")
+
+        elapsed_time = data.get("elapsed_time")
+        if elapsed_time is not None:
+            if isinstance(elapsed_time, bool) or not isinstance(
+                elapsed_time, (int, float)
+            ):
+                raise ValueError(
+                    f"{context} 'elapsed_time' must be numeric when present."
+                )
+            if elapsed_time < 0:
+                raise ValueError(
+                    f"{context} 'elapsed_time' must be non-negative, got {elapsed_time!r}."
+                )
+            elapsed_time = float(elapsed_time)
+
+        sanitized_metadata = sanitize_data(metadata)
+        try:
+            metadata_json = json.dumps(
+                sanitized_metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{context} metadata is not JSON-serializable: {error}") from error
+
+        return (
+            run_id,
+            event.sequence,
+            summarize_text(evaluator),
+            status.upper(),
+            int(passed),
+            score,
+            summarize_text(feedback) if feedback is not None else None,
+            metadata_json,
+            summarize_text(error_type) if error_type is not None else None,
+            elapsed_time,
+        )
 
     def save_run(self, result: EvalResult, dataset: str) -> None:
         if self.read_only:
@@ -309,6 +455,7 @@ class SQLiteStorage(RunStorage):
             )
             for event in sorted(result.trace, key=lambda item: item.sequence)
         ]
+        evaluator_values = self._evaluator_outcome_rows(result)
 
         try:
             with self._connection() as connection:
@@ -331,6 +478,16 @@ class SQLiteStorage(RunStorage):
                     """,
                     event_values,
                 )
+                if evaluator_values:
+                    connection.executemany(
+                        """
+                        INSERT INTO evaluator_outcomes (
+                            run_id, sequence, evaluator, status, passed, score,
+                            feedback, metadata_json, error_type, elapsed_time
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        evaluator_values,
+                    )
                 if result.experiment_id is not None:
                     updated = connection.execute(
                         """
@@ -385,6 +542,60 @@ class SQLiteStorage(RunStorage):
             )
         except (TypeError, json.JSONDecodeError) as error:
             raise StorageError(f"Stored trace for run {run_id} is invalid: {error}") from error
+
+    def get_evaluator_outcomes(self, run_id: str) -> tuple[StoredEvaluatorOutcome, ...]:
+        try:
+            with self._connection() as connection:
+                if not self._table_exists(connection, "evaluator_outcomes"):
+                    return ()
+                rows = connection.execute(
+                    """
+                    SELECT run_id, sequence, evaluator, status, passed, score,
+                           feedback, metadata_json, error_type, elapsed_time
+                    FROM evaluator_outcomes
+                    WHERE run_id = ?
+                    ORDER BY run_id, sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError(
+                f"Could not load evaluator outcomes for run {run_id}: {error}"
+            ) from error
+
+        outcomes: list[StoredEvaluatorOutcome] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                raise StorageError(
+                    f"Stored evaluator outcome for run {run_id} is invalid: {error}"
+                ) from error
+            if not isinstance(metadata, dict):
+                raise StorageError(
+                    f"Stored evaluator outcome for run {run_id} has invalid metadata."
+                )
+            outcomes.append(
+                StoredEvaluatorOutcome(
+                    run_id=row["run_id"],
+                    sequence=int(row["sequence"]),
+                    evaluator=row["evaluator"],
+                    status=row["status"],
+                    passed=bool(row["passed"]),
+                    score=(
+                        float(row["score"]) if row["score"] is not None else None
+                    ),
+                    feedback=row["feedback"],
+                    metadata=metadata,
+                    error_type=row["error_type"],
+                    elapsed_time=(
+                        float(row["elapsed_time"])
+                        if row["elapsed_time"] is not None
+                        else None
+                    ),
+                )
+            )
+        return tuple(outcomes)
 
     def list_runs(
         self,
