@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,12 @@ from agentlab.adapters.repo_doctor import (
 from agentlab.runner import create_workspace
 
 SESSION_ID = "a" * 32
+
+
+def _active_interpreter(project: Path) -> Path:
+    if os.name == "nt":
+        return (project / ".venv" / "Scripts" / "python.exe").resolve()
+    return (project / ".venv" / "bin" / "python").resolve()
 
 
 def _project(tmp_path: Path) -> Path:
@@ -123,7 +130,7 @@ def test_structured_suspension_and_resume_use_only_repo_doctor_session(
         assert result.stdout == ""
         assert not (workspace / "requirements.txt").exists()
         assert calls[0][0][:4] == (
-            str((project / ".venv" / "Scripts" / "python.exe").resolve()),
+            str(_active_interpreter(project)),
             "-B",
             "-m",
             "repo_doctor.cli",
@@ -209,7 +216,7 @@ def test_repo_doctor_provenance_is_checkout_local_and_sanitized(
     context = RepoDoctorAdapter._launch_context()
     assert context.project == project
     assert context.prefix == (
-        str((project / ".venv" / "Scripts" / "python.exe").resolve()),
+        str(_active_interpreter(project)),
         "-B",
         "-m",
         "repo_doctor.cli",

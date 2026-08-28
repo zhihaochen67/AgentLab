@@ -72,7 +72,10 @@ def test_database_write_failure_does_not_leak_workspace(monkeypatch) -> None:
         assert not adapter.workspace.exists()
 
 
-def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
+def test_cli_experiment_preflight_aborts_before_any_run(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     secret = "cli-provider-secret-123456"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
     monkeypatch.delenv("REPO_DOCTOR_BASE_URL", raising=False)
@@ -118,7 +121,10 @@ def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
         assert secret.encode() not in database.read_bytes()
 
 
-def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> None:
+def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     secret = "your api key must be replaced in cli"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
@@ -153,7 +159,10 @@ def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> No
         assert secret.encode() not in database.read_bytes()
 
 
-def test_cli_experiment_records_explicit_variant_metadata(monkeypatch) -> None:
+def test_cli_experiment_records_explicit_variant_metadata(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
@@ -273,7 +282,10 @@ def test_cli_lists_available_agents() -> None:
     assert "AI coding repair agent evaluated by AgentLab" in result.stdout
 
 
-def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
+def test_cli_experiment_accepts_agent_selection(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
@@ -469,4 +481,4 @@ def test_cli_resume_rejects_invalid_or_replayed_execution(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.load_active_execution_session", rejected)
     result = CliRunner().invoke(app, ["resume", "b" * 32])
     assert result.exit_code == 1
-    assert "cannot be replayed" in result.stdout
+    assert "cannot be replayed" in " ".join(result.stdout.split())

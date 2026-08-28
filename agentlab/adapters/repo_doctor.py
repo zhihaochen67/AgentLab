@@ -130,7 +130,6 @@ class RepoDoctorAdapter(AgentAdapter):
 
     def preflight(self) -> AgentPreflightResult:
         """Require provider settings and verified Repo Doctor provenance."""
-        self._launch_context()
         api_key_name = "REPO_DOCTOR_API_KEY"
         if not is_plausible_api_key(os.environ.get(api_key_name)):
             raise AgentPreflightError(invalid_variables=(api_key_name,))
@@ -140,6 +139,7 @@ class RepoDoctorAdapter(AgentAdapter):
         missing = tuple(name for name in names if not values[name])
         if missing:
             raise AgentPreflightError(missing)
+        self._launch_context()
         return AgentPreflightResult(model=values["REPO_DOCTOR_MODEL"])
 
     def trace_metadata(self) -> dict[str, str]:
