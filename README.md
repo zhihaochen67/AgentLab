@@ -50,6 +50,40 @@ Two properties shape the design:
 - The deterministic pytest gate is authoritative. An optional evaluator (e.g. an LLM judge) can only *further* fail a run — it never rescues a red test suite.
 - Evaluator outcomes are first-class persisted data, not trace JSON parsed on demand. Aggregations and comparisons read the normalized `evaluator_outcomes` table.
 
+## Evaluation Examples
+
+### Repeated-Trial Benchmark
+
+AgentLab evaluates agents across reproducible benchmark cases and repeated trials rather than relying on a single run. In this experiment, Repo Doctor completed 30 of 33 runs across 11 repair cases with three trials per case.
+
+![AgentLab repeated-trial benchmark dashboard](docs/images/agentlab-benchmark.png)
+
+*11 benchmark cases × 3 trials, with persisted per-case success rates and latency metrics.*
+
+### Experiment Comparison
+
+Persisted experiments can be compared without re-running the agent. AgentLab checks experiment compatibility and surfaces changes in success rate, latency, and other aggregate metrics.
+
+![AgentLab experiment comparison overview](docs/images/agentlab-comparison-overall.png)
+
+*The candidate pipeline reduced average latency from 14.981 s to 3.169 s, but its success rate regressed from 90.9% to 12.1%.*
+
+### Per-Case Regression Analysis
+
+Aggregate metrics alone can hide where a configuration changed behavior. AgentLab compares common benchmark cases individually and classifies them as improved, regressed, or unchanged.
+
+![AgentLab per-case regression analysis](docs/images/agentlab-comparison-regressions.png)
+
+*Case-level comparison exposes regressions that would be difficult to diagnose from the overall success-rate delta alone.*
+
+### LLM-as-Judge
+
+AgentLab also supports an optional post-verification evaluator. The result below is a persisted historical smoke test produced through the real OpenAI-compatible judge runtime against DeepSeek's compatible API.
+
+![AgentLab persisted LLM-as-Judge result](docs/images/agentlab-llm-judge.png)
+
+*The persisted **`LLMJudgeEvaluator`** outcome shows 100% evaluator coverage, a passing verdict, zero evaluator errors, and a score of 1.0. Viewing the stored result does not re-execute the provider request.*
+
 ## Core Concepts
 
 - **Agent Adapter** — the boundary between AgentLab and an agent under evaluation. Adapters implement `repair(workspace, task)` and may contribute identity metadata, preflight validation, and diagnostics.
