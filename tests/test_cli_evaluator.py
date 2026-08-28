@@ -89,7 +89,9 @@ def test_eval_default_does_not_require_judge_env(monkeypatch) -> None:
     result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
 
     assert result.exit_code == 0
-    assert calls["kwargs"] == {}
+    assert calls["kwargs"]["evaluator"] is None
+    assert calls["kwargs"]["evaluator_name"] is None
+    assert calls["kwargs"]["dataset"] == "dataset.yaml"
     assert [run_id for run_id, _dataset in storage.saved] == ["run-case-a"]
 
 
@@ -108,9 +110,7 @@ def test_experiment_default_does_not_require_judge_env(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.run_experiment", fake_run_experiment)
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: object())
 
-    result = CliRunner().invoke(
-        app, ["experiment", "dataset.yaml", "--trials", "1"]
-    )
+    result = CliRunner().invoke(app, ["experiment", "dataset.yaml", "--trials", "1"])
 
     assert result.exit_code == 0
     assert captured["evaluator"] is None
@@ -131,9 +131,7 @@ def test_benchmark_default_does_not_require_judge_env(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.run_experiment", fake_run_experiment)
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: object())
 
-    result = CliRunner().invoke(
-        app, ["benchmark", "dataset.yaml", "--trials", "1"]
-    )
+    result = CliRunner().invoke(app, ["benchmark", "dataset.yaml", "--trials", "1"])
 
     assert result.exit_code == 0
     assert captured["evaluator"] is None
@@ -155,12 +153,12 @@ def test_eval_evaluator_none_preserves_old_behavior(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.evaluate_case", fake_evaluate)
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: storage)
 
-    result = CliRunner().invoke(
-        app, ["eval", "dataset.yaml", "--evaluator", "none"]
-    )
+    result = CliRunner().invoke(app, ["eval", "dataset.yaml", "--evaluator", "none"])
 
     assert result.exit_code == 0
-    assert calls["kwargs"] == {}
+    assert calls["kwargs"]["evaluator"] is None
+    assert calls["kwargs"]["evaluator_name"] is None
+    assert calls["kwargs"]["dataset"] == "dataset.yaml"
 
 
 def test_eval_llm_judge_is_wired(monkeypatch) -> None:

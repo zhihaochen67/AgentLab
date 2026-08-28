@@ -62,7 +62,9 @@ def redact_text(value: object) -> str:
         text = text.replace(secret, REDACTED)
     text = _BEARER_TOKEN.sub("Bearer " + REDACTED, text)
     text = _API_TOKEN.sub(REDACTED, text)
-    text = _CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + match.group(2) + REDACTED, text)
+    text = _CREDENTIAL_ASSIGNMENT.sub(
+        lambda match: match.group(1) + match.group(2) + REDACTED, text
+    )
     return text
 
 
@@ -79,7 +81,10 @@ def _sanitize(value: Any, *, key: object | None = None) -> Any:
     if key is not None and _is_sensitive_key(key):
         return REDACTED
     if isinstance(value, Mapping):
-        return {str(item_key): _sanitize(item, key=item_key) for item_key, item in value.items()}
+        return {
+            str(item_key): _sanitize(item, key=item_key)
+            for item_key, item in value.items()
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_sanitize(item) for item in value]
     if isinstance(value, Path):
@@ -103,15 +108,28 @@ class Tracer:
         self,
         *,
         run_id: str | None = None,
+        events: tuple[TraceEvent, ...] = (),
+        elapsed_offset: float = 0.0,
         clock: Callable[[], float] = time.perf_counter,
         wall_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.run_id = run_id or str(uuid.uuid4())
+        if any(event.run_id != self.run_id for event in events):
+            raise ValueError("Every restored trace event must match run_id.")
+        if tuple(event.sequence for event in events) != tuple(
+            range(1, len(events) + 1)
+        ):
+            raise ValueError(
+                "Restored trace events must have contiguous sequence numbers."
+            )
+        if elapsed_offset < 0:
+            raise ValueError("elapsed_offset must be non-negative.")
         self._clock = clock
         self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
         self._started_at = self._clock()
-        self._sequence = 0
-        self._events: list[TraceEvent] = []
+        self._elapsed_offset = elapsed_offset
+        self._sequence = len(events)
+        self._events = list(events)
 
     @property
     def events(self) -> tuple[TraceEvent, ...]:
@@ -141,4 +159,4 @@ class Tracer:
 
     def total_elapsed(self) -> float:
         """Return elapsed monotonic seconds since tracer creation."""
-        return self.elapsed_since(self._started_at)
+        return self._elapsed_offset + self.elapsed_since(self._started_at)

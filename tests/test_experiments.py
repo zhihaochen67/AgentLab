@@ -235,7 +235,10 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
         assert metrics.failure_types == (("timeout", 1),)
 
 
-def test_repo_doctor_preflight_aborts_without_runs_or_secret(monkeypatch) -> None:
+def test_repo_doctor_preflight_aborts_without_runs_or_secret(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     secret = "experiment-provider-secret-123456"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
     monkeypatch.delenv("REPO_DOCTOR_BASE_URL", raising=False)
@@ -276,6 +279,7 @@ def test_repo_doctor_preflight_aborts_without_runs_or_secret(monkeypatch) -> Non
 
 def test_invalid_api_key_aborts_before_evaluation_repair_or_network(
     monkeypatch,
+    fake_repo_doctor_project: Path,
 ) -> None:
     secret = "your api key must be replaced"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)

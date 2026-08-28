@@ -3,9 +3,13 @@
 from agentlab.adapters.base import (
     AgentAdapter,
     AgentExecutionError,
+    AgentInfo,
     AgentPreflightError,
     AgentPreflightResult,
+    AgentResumeHandle,
+    AgentResumeUnsupportedError,
     AgentRunResult,
+    AgentSuspended,
 )
 from agentlab.adapters.registry import (
     AgentRegistry,
@@ -19,10 +23,14 @@ __all__ = [
     "AgentDiagnostics",
     "AgentExecutionError",
     "AgentFailureType",
+    "AgentInfo",
     "AgentPreflightError",
     "AgentPreflightResult",
     "AgentRegistry",
+    "AgentResumeHandle",
+    "AgentResumeUnsupportedError",
     "AgentRunResult",
+    "AgentSuspended",
     "RepoDoctorAdapter",
     "create_default_registry",
 ]

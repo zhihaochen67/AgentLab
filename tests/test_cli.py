@@ -1,6 +1,7 @@
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -10,11 +11,14 @@ from agentlab.cli import app
 from agentlab.models import (
     CaseExperimentMetrics,
     EvalCase,
+    EvalResult,
+    EvaluationSuspended,
     Experiment,
     ExperimentMetrics,
 )
 from agentlab.runner import evaluate_case as run_evaluation
 from agentlab.storage import SQLiteStorage, StorageError
+from agentlab.tracer import TraceEvent
 
 
 class CapturingAdapter(AgentAdapter):
@@ -53,7 +57,9 @@ def test_database_write_failure_does_not_leak_workspace(monkeypatch) -> None:
         monkeypatch.setattr("agentlab.cli.load_dataset", lambda _dataset: [case])
         monkeypatch.setattr(
             "agentlab.cli.evaluate_case",
-            lambda selected_case: run_evaluation(selected_case, adapter=adapter),
+            lambda selected_case, **_kwargs: run_evaluation(
+                selected_case, adapter=adapter
+            ),
         )
         monkeypatch.setattr("agentlab.cli._open_storage", lambda: FailingStorage())
 
@@ -66,7 +72,10 @@ def test_database_write_failure_does_not_leak_workspace(monkeypatch) -> None:
         assert not adapter.workspace.exists()
 
 
-def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
+def test_cli_experiment_preflight_aborts_before_any_run(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     secret = "cli-provider-secret-123456"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
     monkeypatch.delenv("REPO_DOCTOR_BASE_URL", raising=False)
@@ -112,7 +121,10 @@ def test_cli_experiment_preflight_aborts_before_any_run(monkeypatch) -> None:
         assert secret.encode() not in database.read_bytes()
 
 
-def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> None:
+def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     secret = "your api key must be replaced in cli"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
@@ -147,7 +159,10 @@ def test_cli_invalid_api_key_is_redacted_and_executes_no_runs(monkeypatch) -> No
         assert secret.encode() not in database.read_bytes()
 
 
-def test_cli_experiment_records_explicit_variant_metadata(monkeypatch) -> None:
+def test_cli_experiment_records_explicit_variant_metadata(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
@@ -252,6 +267,7 @@ def test_cli_lists_and_shows_persisted_experiment(monkeypatch) -> None:
         assert "100.0%" in shown.stdout
         assert "addition" in shown.stdout
 
+
 def test_cli_lists_available_agents() -> None:
     result = CliRunner().invoke(
         app,
@@ -265,7 +281,11 @@ def test_cli_lists_available_agents() -> None:
     assert "repo_doctor" in result.stdout
     assert "AI coding repair agent evaluated by AgentLab" in result.stdout
 
-def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
+
+def test_cli_experiment_accepts_agent_selection(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", "placeholder api key")
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", "deepseek-v4-flash")
@@ -276,16 +296,12 @@ def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
 
         monkeypatch.setattr(
             "agentlab.cli.load_dataset",
-            lambda _dataset, **_kwargs: [
-                EvalCase("case-a", "unused", "Fix A")
-            ],
+            lambda _dataset, **_kwargs: [EvalCase("case-a", "unused", "Fix A")],
         )
 
         monkeypatch.setattr(
             "agentlab.experiments.evaluate_case",
-            lambda *_args, **_kwargs: pytest.fail(
-                "evaluation must not run"
-            ),
+            lambda *_args, **_kwargs: pytest.fail("evaluation must not run"),
         )
 
         result = CliRunner().invoke(
@@ -303,6 +319,7 @@ def test_cli_experiment_accepts_agent_selection(monkeypatch) -> None:
         assert result.exit_code == 1
         assert len(experiments) == 1
         assert experiments[0].status == "aborted"
+
 
 def test_cli_report_writes_json_file(monkeypatch, tmp_path) -> None:
     experiment = Experiment(
@@ -376,3 +393,92 @@ def test_cli_report_writes_json_file(monkeypatch, tmp_path) -> None:
     assert '"label": "CLI report"' in report_text
     assert '"total_runs": 1' in report_text
     assert '"case_id": "case-a"' in report_text
+
+
+def test_cli_suspension_prints_actionable_resume_and_uses_distinct_exit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    case = EvalCase("case-a", str(tmp_path), "Fix it")
+
+    class EmptyStorage:
+        database_path = tmp_path / "agentlab.db"
+
+        def save_run(self, *_args):
+            pytest.fail("a suspended evaluation must not be persisted as a final run")
+
+    monkeypatch.setattr("agentlab.cli.load_dataset", lambda _dataset: [case])
+    monkeypatch.setattr("agentlab.cli._open_storage", lambda: EmptyStorage())
+    monkeypatch.setattr(
+        "agentlab.cli.evaluate_case",
+        lambda *_args, **_kwargs: EvaluationSuspended(
+            "a" * 32,
+            "run-1",
+            "case-a",
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["eval", "dataset.yaml", "--agent", "mock_agent"])
+    assert result.exit_code == 75
+    assert "WAITING_FOR_APPROVAL" in result.stdout
+    assert f"Execution ID: {'a' * 32}" in result.stdout
+    assert f"agentlab resume {'a' * 32}" in result.stdout
+    assert "externally" in result.stdout
+
+
+def test_cli_resume_uses_stored_context_and_persists_completion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "agentlab.db"
+    session = SimpleNamespace(
+        adapter="mock_agent",
+        evaluator=None,
+        database_path=str(database),
+        dataset="dataset.yaml",
+    )
+    timestamp = "2026-08-28T00:00:00+00:00"
+    trace = (
+        TraceEvent(
+            "run-1",
+            1,
+            "run_start",
+            timestamp,
+            {"adapter": "MockAgentAdapter"},
+        ),
+        TraceEvent(
+            "run-1",
+            2,
+            "run_end",
+            timestamp,
+            {"elapsed_time": 1.0},
+        ),
+    )
+    completed = EvalResult("case-a", True, False, True, run_id="run-1", trace=trace)
+    observed = {}
+    monkeypatch.setattr(
+        "agentlab.cli.load_active_execution_session", lambda value: session
+    )
+
+    def fake_resume(value, *, adapter, evaluator):
+        observed.update(value=value, adapter=adapter.info.name, evaluator=evaluator)
+        return completed
+
+    monkeypatch.setattr("agentlab.cli.resume_evaluation", fake_resume)
+    result = CliRunner().invoke(app, ["resume", "a" * 32])
+    assert result.exit_code == 0
+    assert observed == {"value": "a" * 32, "adapter": "mock_agent", "evaluator": None}
+    assert "PASS case-a" in result.stdout
+    assert SQLiteStorage(database).get_run("run-1") is not None
+
+
+def test_cli_resume_rejects_invalid_or_replayed_execution(monkeypatch) -> None:
+    def rejected(_execution_id):
+        from agentlab.execution_sessions import ExecutionSessionError
+
+        raise ExecutionSessionError("terminal and cannot be replayed")
+
+    monkeypatch.setattr("agentlab.cli.load_active_execution_session", rejected)
+    result = CliRunner().invoke(app, ["resume", "b" * 32])
+    assert result.exit_code == 1
+    assert "cannot be replayed" in " ".join(result.stdout.split())

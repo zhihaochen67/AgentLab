@@ -9,7 +9,7 @@ It is not a demo or a wrapper around one agent: it is an evaluation pipeline wit
 ## Highlights
 
 - **Reproducible benchmarks** — YAML task datasets, isolated per-run workspaces, and a deterministic `pytest before → agent → pytest after` gate.
-- **Agent adapters** — a small registry (`repo_doctor`, `mock_agent`) behind one `AgentAdapter` interface; evaluation, experiments, and benchmarking all share it.
+- **Agent adapters** — a small registry (`repo_doctor`, `mock_agent`) behind one `AgentAdapter` interface, including an optional generic suspend/resume capability.
 - **Structured execution traces** — ordered, timestamped `TraceEvent`s per run with per-phase timing, diagnostics, and secret redaction.
 - **Persistent experiments** — repeated trials, per-case aggregates, success rate, latency, and failure taxonomy stored in SQLite.
 - **Experiment comparison** — dataset/case/trial compatibility checks plus success-rate, latency, failure-type, and evaluator deltas.
@@ -88,7 +88,7 @@ AgentLab also supports an optional post-verification evaluator. The result below
 
 - **Agent Adapter** — the boundary between AgentLab and an agent under evaluation. Adapters implement `repair(workspace, task)` and may contribute identity metadata, preflight validation, and diagnostics.
 - **Eval Case / Dataset** — a task (`repository` + `task` description + expected properties) and a YAML collection of cases. Datasets are validated before evaluation.
-- **Run** — one execution of one case: `pytest before → agent → pytest after`, an optional evaluator, a final `EvalResult`, and a full trace.
+- **Run** — one completed execution of one case: `pytest before → agent → pytest after`, an optional evaluator, a final `EvalResult`, and a full trace. A suspended execution is stored separately and is not a PASS or FAIL run.
 - **Experiment** — repeated independent trials over selected cases with persisted metadata (agent version, prompt variant, notes) and aggregate metrics.
 - **Trace** — the ordered, sanitized event log of a run (`run_start`, pytest phases, `agent_end`, `evaluator_end`, errors, `run_end`) with timestamps and per-phase elapsed time.
 - **Evaluator** — any object implementing `evaluate(workspace, case) -> EvaluationOutcome` (`passed`, `score`, `feedback`, `metadata`).
@@ -129,7 +129,30 @@ Compare two persisted experiments (e.g. after changing `--prompt-variant` or `--
 uv run agentlab compare <baseline_experiment_id> <candidate_experiment_id>
 ```
 
-The bundled `repo_doctor` agent additionally requires the Repo Doctor CLI on `PATH` plus its own `REPO_DOCTOR_*` provider settings; AgentLab never shares that configuration with any other component.
+The bundled `repo_doctor` agent runs only from a verified Repo Doctor checkout and its checkout-local virtual environment; it never falls back to a `repo-doctor` executable or package on `PATH`.
+
+## Resumable Repo Doctor Evaluations
+
+Set `AGENTLAB_REPO_DOCTOR_PROJECT` to the absolute, canonical Repo Doctor checkout path. The checkout must contain its own virtual environment (`.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on POSIX). Windows development environments may omit the variable only when `D:\repo-doctor` exists; POSIX always requires explicit configuration.
+
+When `REPO_DOCTOR_TOOLHUB_PROJECT` is configured, AgentLab starts Repo Doctor with its MCP backend. A single-case evaluation can then pause if Repo Doctor's versioned repair-session report says approval is pending:
+
+```text
+uv run agentlab eval datasets/repo_doctor_basic.yaml --agent repo_doctor
+WAITING_FOR_APPROVAL
+Execution ID: <agentlab-execution-id>
+Resume with: agentlab resume <agentlab-execution-id>
+```
+
+The command exits with status 75 while waiting. The operator approves through Repo Doctor's documented ToolHub trusted-admin workflow, then resumes the preserved evaluation:
+
+```bash
+uv run agentlab resume <agentlab-execution-id>
+```
+
+AgentLab never approves its own operation, never treats a ToolHub request ID as authority, and never reproduces Repo Doctor's approval-state logic. Repo Doctor owns request-status reconciliation, resume-tool validation, replay protection, and ToolHub trace correlation. AgentLab stores only its execution ID, Repo Doctor's opaque repair-session ID, the marked temporary workspace path, the case snapshot, pytest-before state, and the sanitized trace. Active execution sessions are bounded, versioned JSON under the platform state directory (override with absolute `AGENTLAB_STATE_ROOT`); final `EvalResult` rows remain strictly PASS or FAIL in SQLite.
+
+The workspace remains present while approval is pending and is cleaned only after terminal completion or failure. Agent Runtime V1 supports the ordinary single-evaluation CLI path. Repeated-trial experiments continue to work when no suspension occurs, but abort explicitly if an agent suspends; the suspended trial is not counted as FAIL and experiment metrics are not redesigned in V1.
 
 ## LLM-as-Judge
 

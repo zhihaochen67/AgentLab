@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -21,7 +22,10 @@ def test_agent_adapter_is_abstract() -> None:
         AgentAdapter()
 
 
-def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(monkeypatch) -> None:
+def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", "  sk-test_0123456789abcdef  ")
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", " https://provider.invalid/v1 ")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", " model-name ")
@@ -29,6 +33,27 @@ def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(monkeypatch) -> N
     result = RepoDoctorAdapter().preflight()
 
     assert result.model == "model-name"
+
+
+def test_repo_doctor_preflight_validates_provider_before_provenance(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "sk-test_0123456789abcdef")
+    monkeypatch.delenv("REPO_DOCTOR_BASE_URL", raising=False)
+    monkeypatch.delenv("REPO_DOCTOR_MODEL", raising=False)
+    monkeypatch.setattr(
+        RepoDoctorAdapter,
+        "_launch_context",
+        lambda: pytest.fail("provenance validation must follow provider validation"),
+    )
+
+    with pytest.raises(AgentPreflightError) as captured:
+        RepoDoctorAdapter().preflight()
+
+    assert captured.value.missing_variables == (
+        "REPO_DOCTOR_BASE_URL",
+        "REPO_DOCTOR_MODEL",
+    )
 
 
 @pytest.mark.parametrize(
@@ -46,6 +71,7 @@ def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(monkeypatch) -> N
 def test_repo_doctor_preflight_rejects_obviously_invalid_api_keys(
     monkeypatch,
     api_key,
+    fake_repo_doctor_project: Path,
 ) -> None:
     if api_key is None:
         monkeypatch.delenv("REPO_DOCTOR_API_KEY", raising=False)
@@ -78,6 +104,7 @@ def test_repo_doctor_rejects_non_agentlab_workspace() -> None:
 )
 def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
     monkeypatch,
+    fake_repo_doctor_project: Path,
     configured_variant: str | None,
     expected_variant: str,
 ) -> None:
@@ -92,7 +119,12 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
         workspace = create_workspace(str(source))
         calls: list[tuple[tuple[str, ...], Path, bool]] = []
         observed_task = []
-        executable = str(Path("C:/tools/repo-doctor.exe"))
+        interpreter = fake_repo_doctor_project / ".venv"
+        if os.name == "nt":
+            interpreter = interpreter / "Scripts" / "python.exe"
+        else:
+            interpreter = interpreter / "bin" / "python"
+        executable = str(interpreter.resolve())
 
         class Result:
             def __init__(self, returncode=0, stdout="", stderr="") -> None:
@@ -100,17 +132,18 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 self.stdout = stdout
                 self.stderr = stderr
 
-        def fake_run(command, *, cwd, capture_output, text, check=False):
+        def fake_run(command, *, cwd, capture_output, text, check=False, env=None):
             calls.append((tuple(command), Path(cwd), check))
             if tuple(command)[:2] == ("git", "diff"):
                 return Result(stdout="--- a/module.py\n+++ b/module.py\n")
-            if next(iter(command)) == executable:
+            if "repo_doctor.cli" in command:
                 task_path = Path(command[command.index("--task-file") + 1])
                 observed_task.append(task_path.read_text(encoding="utf-8"))
-                return Result(stdout="Patch applied\nVerification passed\nChange kept\n")
+                return Result(
+                    stdout="Patch applied\nVerification passed\nChange kept\n"
+                )
             return Result()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:
@@ -125,8 +158,11 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
             result = adapter.repair(workspace, "fix VALUE")
 
             agent_command, agent_cwd, agent_check = calls[-2]
-            assert agent_command[:6] == (
+            assert agent_command[:9] == (
                 executable,
+                "-B",
+                "-m",
+                "repo_doctor.cli",
                 "fix",
                 str(workspace.resolve()),
                 "--ai",
@@ -136,7 +172,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
             assert "--task-file" in agent_command
             assert "--report-json" in agent_command
             assert agent_command[-2:] == ("--timeout", "45")
-            assert agent_cwd == workspace.resolve()
+            assert agent_cwd == fake_repo_doctor_project
             assert agent_check is False
             assert observed_task == ["fix VALUE"]
             assert calls[-1][0][:2] == ("git", "diff")
@@ -146,7 +182,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 ("git", "-c"),
             ]
             assert not (workspace / "requirements.txt").exists()
-            assert not (workspace / WORKSPACE_MARKER).exists()
+            assert (workspace / WORKSPACE_MARKER).exists()
             assert result.returncode == 0
             assert result.stdout.startswith("Patch applied")
             assert result.diagnostics is not None
@@ -171,7 +207,10 @@ def test_repo_doctor_exposes_non_secret_execution_metadata(monkeypatch) -> None:
     }
 
 
-def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> None:
+def test_repo_doctor_exposes_verification_failure_diagnostics(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
         source = Path(directory) / "source"
         source.mkdir()
@@ -181,7 +220,6 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
             encoding="utf-8",
         )
         workspace = create_workspace(str(source))
-        executable = str(Path("C:/tools/repo-doctor.exe"))
 
         class Result:
             returncode = 1
@@ -198,7 +236,6 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
                 return type("DiffResult", (), {"returncode": 0, "stdout": ""})()
             return Result()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:
@@ -208,8 +245,7 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
             diagnostics = captured.value.diagnostics
             assert diagnostics is not None
             assert (
-                diagnostics.failure_type
-                is AgentFailureType.REPAIR_VERIFICATION_FAILED
+                diagnostics.failure_type is AgentFailureType.REPAIR_VERIFICATION_FAILED
             )
             assert diagnostics.failure_phase == "verification"
             assert diagnostics.patch_applied is True
@@ -222,6 +258,7 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
 
 def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
     monkeypatch,
+    fake_repo_doctor_project: Path,
 ) -> None:
     secret = "adapter-report-secret-123456"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
@@ -234,7 +271,6 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
             encoding="utf-8",
         )
         workspace = create_workspace(str(source))
-        executable = str(Path("C:/tools/repo-doctor.exe"))
         observed = {}
 
         class Result:
@@ -243,7 +279,7 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
             stderr = ""
 
         def fake_run(command, **_kwargs):
-            if next(iter(command)) == executable:
+            if "repo_doctor.cli" in command:
                 task_path = Path(command[command.index("--task-file") + 1])
                 report_path = Path(command[command.index("--report-json") + 1])
                 observed["task"] = task_path.read_text(encoding="utf-8")
@@ -255,7 +291,10 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
                             "prompt_variant": "candidate-v3",
                             "task_provided": True,
                             "analysis_summary": "Two related findings.",
-                            "selected_finding": {"id": "finding-2", "title": "Coupled bug"},
+                            "selected_finding": {
+                                "id": "finding-2",
+                                "title": "Coupled bug",
+                            },
                             "behavioral_contract": {
                                 "must_fix": ["Fix both related failures."],
                                 "must_preserve": ["Keep existing valid values."],
@@ -288,9 +327,10 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
                     encoding="utf-8",
                 )
                 return Result()
-            return type("GitResult", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type(
+                "GitResult", (), {"returncode": 0, "stdout": "", "stderr": ""}
+            )()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:

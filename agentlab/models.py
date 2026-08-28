@@ -29,6 +29,16 @@ class EvalResult:
 
 
 @dataclass(frozen=True)
+class EvaluationSuspended:
+    """Non-final control result for a persisted, resumable evaluation."""
+
+    execution_id: str
+    run_id: str
+    case_id: str
+    status: str = "WAITING_FOR_APPROVAL"
+
+
+@dataclass(frozen=True)
 class Experiment:
     """Persisted metadata for one repeated-trial evaluation experiment."""
 
