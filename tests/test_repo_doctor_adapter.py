@@ -92,7 +92,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
         workspace = create_workspace(str(source))
         calls: list[tuple[tuple[str, ...], Path, bool]] = []
         observed_task = []
-        executable = str(Path("C:/tools/repo-doctor.exe"))
+        executable = str(Path(r"D:\repo-doctor\.venv\Scripts\python.exe").resolve())
 
         class Result:
             def __init__(self, returncode=0, stdout="", stderr="") -> None:
@@ -100,17 +100,18 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 self.stdout = stdout
                 self.stderr = stderr
 
-        def fake_run(command, *, cwd, capture_output, text, check=False):
+        def fake_run(command, *, cwd, capture_output, text, check=False, env=None):
             calls.append((tuple(command), Path(cwd), check))
             if tuple(command)[:2] == ("git", "diff"):
                 return Result(stdout="--- a/module.py\n+++ b/module.py\n")
-            if next(iter(command)) == executable:
+            if "repo_doctor.cli" in command:
                 task_path = Path(command[command.index("--task-file") + 1])
                 observed_task.append(task_path.read_text(encoding="utf-8"))
-                return Result(stdout="Patch applied\nVerification passed\nChange kept\n")
+                return Result(
+                    stdout="Patch applied\nVerification passed\nChange kept\n"
+                )
             return Result()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:
@@ -125,8 +126,11 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
             result = adapter.repair(workspace, "fix VALUE")
 
             agent_command, agent_cwd, agent_check = calls[-2]
-            assert agent_command[:6] == (
+            assert agent_command[:9] == (
                 executable,
+                "-B",
+                "-m",
+                "repo_doctor.cli",
                 "fix",
                 str(workspace.resolve()),
                 "--ai",
@@ -136,7 +140,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
             assert "--task-file" in agent_command
             assert "--report-json" in agent_command
             assert agent_command[-2:] == ("--timeout", "45")
-            assert agent_cwd == workspace.resolve()
+            assert agent_cwd == Path(r"D:\repo-doctor").resolve()
             assert agent_check is False
             assert observed_task == ["fix VALUE"]
             assert calls[-1][0][:2] == ("git", "diff")
@@ -146,7 +150,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 ("git", "-c"),
             ]
             assert not (workspace / "requirements.txt").exists()
-            assert not (workspace / WORKSPACE_MARKER).exists()
+            assert (workspace / WORKSPACE_MARKER).exists()
             assert result.returncode == 0
             assert result.stdout.startswith("Patch applied")
             assert result.diagnostics is not None
@@ -198,7 +202,9 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
                 return type("DiffResult", (), {"returncode": 0, "stdout": ""})()
             return Result()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
+        monkeypatch.setattr(
+            "agentlab.adapters.repo_doctor.shutil.which", lambda _: executable
+        )
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:
@@ -208,8 +214,7 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(monkeypatch) -> No
             diagnostics = captured.value.diagnostics
             assert diagnostics is not None
             assert (
-                diagnostics.failure_type
-                is AgentFailureType.REPAIR_VERIFICATION_FAILED
+                diagnostics.failure_type is AgentFailureType.REPAIR_VERIFICATION_FAILED
             )
             assert diagnostics.failure_phase == "verification"
             assert diagnostics.patch_applied is True
@@ -234,7 +239,6 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
             encoding="utf-8",
         )
         workspace = create_workspace(str(source))
-        executable = str(Path("C:/tools/repo-doctor.exe"))
         observed = {}
 
         class Result:
@@ -243,7 +247,7 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
             stderr = ""
 
         def fake_run(command, **_kwargs):
-            if next(iter(command)) == executable:
+            if "repo_doctor.cli" in command:
                 task_path = Path(command[command.index("--task-file") + 1])
                 report_path = Path(command[command.index("--report-json") + 1])
                 observed["task"] = task_path.read_text(encoding="utf-8")
@@ -255,7 +259,10 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
                             "prompt_variant": "candidate-v3",
                             "task_provided": True,
                             "analysis_summary": "Two related findings.",
-                            "selected_finding": {"id": "finding-2", "title": "Coupled bug"},
+                            "selected_finding": {
+                                "id": "finding-2",
+                                "title": "Coupled bug",
+                            },
                             "behavioral_contract": {
                                 "must_fix": ["Fix both related failures."],
                                 "must_preserve": ["Keep existing valid values."],
@@ -288,9 +295,10 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
                     encoding="utf-8",
                 )
                 return Result()
-            return type("GitResult", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type(
+                "GitResult", (), {"returncode": 0, "stdout": "", "stderr": ""}
+            )()
 
-        monkeypatch.setattr("agentlab.adapters.repo_doctor.shutil.which", lambda _: executable)
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
 
         try:

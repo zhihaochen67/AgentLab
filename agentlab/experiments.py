@@ -48,9 +48,7 @@ class ExperimentPreflightError(ExperimentAbortedError):
         self.missing_variables = missing_variables
         self.invalid_variables = invalid_variables
         if invalid_variables:
-            message = ", ".join(
-                f"{name} appears invalid" for name in invalid_variables
-            )
+            message = ", ".join(f"{name} appears invalid" for name in invalid_variables)
         else:
             names = ", ".join(missing_variables)
             message = f"Missing provider configuration: {names}"
@@ -99,9 +97,7 @@ def run_experiment(
     if trials_per_case < 1:
         raise ValueError("trials_per_case must be at least 1.")
     if evaluator is not None and case_executor is not None:
-        raise ValueError(
-            "Provide either 'evaluator' or 'case_executor', not both."
-        )
+        raise ValueError("Provide either 'evaluator' or 'case_executor', not both.")
     selected = select_experiment_cases(cases, case_ids)
     if not selected:
         raise ValueError("An experiment requires at least one selected case.")
@@ -200,7 +196,15 @@ def _evaluate(
     *,
     evaluator: Evaluator | None = None,
 ) -> EvalResult:
-    return evaluate_case(case, adapter=adapter, evaluator=evaluator)
+    result = evaluate_case(
+        case,
+        adapter=adapter,
+        evaluator=evaluator,
+        suspension_supported=False,
+    )
+    if not isinstance(result, EvalResult):
+        raise TypeError("Experiment evaluation returned a non-final result.")
+    return result
 
 
 def _timestamp(clock: Clock) -> str:

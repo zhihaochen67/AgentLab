@@ -12,6 +12,10 @@ from agentlab.comparison import ExperimentComparisonError, compare_experiments
 from agentlab.dataset import load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.evaluators import JudgeConfigurationError, create_evaluator
+from agentlab.execution_sessions import (
+    ExecutionSessionError,
+    load_active_execution_session,
+)
 from agentlab.experiments import (
     ExperimentAbortedError,
     ExperimentExecution,
@@ -20,22 +24,19 @@ from agentlab.experiments import (
 )
 from agentlab.models import (
     EvalResult,
+    EvaluationSuspended,
     Experiment,
     ExperimentComparison,
     ExperimentMetrics,
 )
 from agentlab.reporting import build_experiment_report
-from agentlab.runner import evaluate_case
+from agentlab.runner import evaluate_case, resume_evaluation
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
 
-app = typer.Typer(
-    help="Agent evaluation and observability platform."
-)
+app = typer.Typer(help="Agent evaluation and observability platform.")
 
-agents_app = typer.Typer(
-    help="Manage available agents."
-)
+agents_app = typer.Typer(help="Manage available agents.")
 
 app.add_typer(
     agents_app,
@@ -43,6 +44,8 @@ app.add_typer(
 )
 
 console = Console()
+SUSPENDED_EXIT_CODE = 75
+
 
 @agents_app.command("list")
 def list_agents():
@@ -63,6 +66,7 @@ def list_agents():
         )
 
     console.print(table)
+
 
 @app.callback()
 def main():
@@ -119,21 +123,18 @@ def run_eval(
     persistence_failed = False
 
     for case in cases:
-        if agent == "repo_doctor" and selected_evaluator is None:
-            result = evaluate_case(case)
-        elif agent == "repo_doctor":
-            result = evaluate_case(case, evaluator=selected_evaluator)
-        elif selected_evaluator is None:
-            result = evaluate_case(
-                case,
-                adapter=selected_adapter,
-            )
-        else:
-            result = evaluate_case(
-                case,
-                adapter=selected_adapter,
-                evaluator=selected_evaluator,
-            )
+        result = evaluate_case(
+            case,
+            adapter=selected_adapter,
+            evaluator=selected_evaluator,
+            dataset=dataset,
+            evaluator_name=None if evaluator == "none" else evaluator,
+            database_path=getattr(storage, "database_path", default_database_path()),
+        )
+
+        if isinstance(result, EvaluationSuspended):
+            _render_suspended(result)
+            raise typer.Exit(SUSPENDED_EXIT_CODE)
 
         try:
             storage.save_run(result, dataset)
@@ -143,19 +144,14 @@ def run_eval(
 
         if result.passed:
             passed_count += 1
+        results.append(result)
 
         table.add_row(
             result.case_id,
             result.run_id,
-            "[green]PASS[/green]"
-            if result.tests_before_passed
-            else "[red]FAIL[/red]",
-            "[green]PASS[/green]"
-            if result.tests_after_passed
-            else "[red]FAIL[/red]",
-            "[green]PASS[/green]"
-            if result.passed
-            else "[red]FAIL[/red]",
+            "[green]PASS[/green]" if result.tests_before_passed else "[red]FAIL[/red]",
+            "[green]PASS[/green]" if result.tests_after_passed else "[red]FAIL[/red]",
+            "[green]PASS[/green]" if result.passed else "[red]FAIL[/red]",
         )
 
     console.print(table)
@@ -181,6 +177,65 @@ def run_eval(
 
     if persistence_failed:
         raise typer.Exit(1)
+
+
+@app.command("resume")
+def resume_execution(execution_id: str):
+    """Resume one persisted single-case evaluation execution."""
+    try:
+        session = load_active_execution_session(execution_id)
+        selected_adapter = create_default_registry().create(session.adapter)
+        selected_evaluator = (
+            create_evaluator(session.evaluator)
+            if session.evaluator is not None
+            else None
+        )
+        result = resume_evaluation(
+            execution_id,
+            adapter=selected_adapter,
+            evaluator=selected_evaluator,
+        )
+    except (
+        ExecutionSessionError,
+        JudgeConfigurationError,
+        KeyError,
+        StorageError,
+        TypeError,
+        ValueError,
+    ) as error:
+        console.print(f"[red]Could not resume execution {execution_id}: {error}[/red]")
+        raise typer.Exit(1) from error
+
+    if isinstance(result, EvaluationSuspended):
+        _render_suspended(result)
+        raise typer.Exit(SUSPENDED_EXIT_CODE)
+
+    database = (
+        Path(session.database_path)
+        if session.database_path
+        else default_database_path()
+    )
+    dataset = session.dataset or "resumed-single-evaluation"
+    try:
+        SQLiteStorage(database).save_run(result, dataset)
+    except (StorageError, TypeError, ValueError) as error:
+        console.print(
+            f"[red]Evaluation completed but could not be persisted: {error}[/red]"
+        )
+        raise typer.Exit(1) from error
+    status = "PASS" if result.passed else "FAIL"
+    markup = "green" if result.passed else "red"
+    console.print(f"[{markup}]{status}[/{markup}] {result.case_id}")
+    console.print(f"Run ID: {result.run_id}")
+
+
+def _render_suspended(result: EvaluationSuspended) -> None:
+    console.print("[yellow]WAITING_FOR_APPROVAL[/yellow]")
+    console.print(f"Execution ID: {result.execution_id}")
+    console.print(
+        "Approve externally through the Repo Doctor / ToolHub trusted admin workflow."
+    )
+    console.print(f"Resume with: agentlab resume {result.execution_id}")
 
 
 @app.command("trace")
@@ -252,13 +307,11 @@ def run_experiment_command(
             ),
         ),
     ] = None,
-
     agent: str = typer.Option(
         "repo_doctor",
         "--agent",
         help="Agent name to evaluate.",
     ),
-
     notes: Annotated[
         str | None,
         typer.Option("--notes", help="Optional experiment notes."),
@@ -316,6 +369,7 @@ def run_experiment_command(
             console.print(f"Experiment: {error.experiment_id}")
         raise typer.Exit(1) from error
     _render_experiment(execution.experiment, execution.metrics)
+
 
 @app.command("benchmark")
 def run_benchmark(
@@ -390,21 +444,12 @@ def run_benchmark(
     console.print("[bold cyan]Agent Benchmark[/bold cyan]")
     console.print(f"Agent: {agent}")
     console.print(f"Experiment: {execution.experiment.experiment_id}")
-    console.print(
-        f"Runs: {execution.metrics.total_runs}"
-    )
-    console.print(
-        f"Passed: {execution.metrics.passed_runs}"
-    )
-    console.print(
-        f"Failed: {execution.metrics.failed_runs}"
-    )
-    console.print(
-        f"Success Rate: {execution.metrics.success_rate:.1f}%"
-    )
-    console.print(
-        f"Average Latency: {execution.metrics.average_latency:.2f}s"
-    )
+    console.print(f"Runs: {execution.metrics.total_runs}")
+    console.print(f"Passed: {execution.metrics.passed_runs}")
+    console.print(f"Failed: {execution.metrics.failed_runs}")
+    console.print(f"Success Rate: {execution.metrics.success_rate:.1f}%")
+    console.print(f"Average Latency: {execution.metrics.average_latency:.2f}s")
+
 
 @app.command("experiments")
 def show_recent_experiments():
@@ -421,21 +466,17 @@ def show_recent_experiments():
         console.print(f"[bold]Experiment:[/bold] {experiment.experiment_id}")
         console.print(f"[bold]Label:[/bold] {experiment.label}")
         console.print(
-            f"[bold]Agent Version:[/bold] "
-            f"{_metadata_value(experiment.agent_version)}"
+            f"[bold]Agent Version:[/bold] {_metadata_value(experiment.agent_version)}"
         )
         console.print(
-            f"[bold]Prompt Variant:[/bold] "
-            f"{_metadata_value(experiment.prompt_variant)}"
+            f"[bold]Prompt Variant:[/bold] {_metadata_value(experiment.prompt_variant)}"
         )
         console.print(f"[bold]Model:[/bold] {_metadata_value(experiment.model)}")
         console.print(
             f"[bold]Status:[/bold] {_experiment_status_markup(experiment.status)}"
         )
         console.print(f"[bold]Runs:[/bold] {experiment.total_runs}")
-        console.print(
-            f"[bold]Trials per case:[/bold] {experiment.trials_per_case}"
-        )
+        console.print(f"[bold]Trials per case:[/bold] {experiment.trials_per_case}")
         console.print(f"[bold]Started:[/bold] {experiment.started_at}")
 
 
@@ -449,6 +490,7 @@ def show_experiment(experiment_id: str):
         raise typer.Exit(1)
     metrics = storage.get_experiment_metrics(experiment_id)
     _render_experiment(experiment, metrics)
+
 
 @app.command("report")
 def generate_report(
@@ -466,9 +508,7 @@ def generate_report(
 
     experiment = storage.get_experiment(experiment_id)
     if experiment is None:
-        console.print(
-            f"[red]Experiment not found: {experiment_id}[/red]"
-        )
+        console.print(f"[red]Experiment not found: {experiment_id}[/red]")
         raise typer.Exit(1)
 
     metrics = storage.get_experiment_metrics(experiment_id)
@@ -498,6 +538,7 @@ def generate_report(
     else:
         console.print_json(report_json)
 
+
 @app.command("compare")
 def compare_experiment_command(
     baseline_experiment_id: str,
@@ -526,8 +567,12 @@ def _render_experiment(
     console.print(f"[bold]Label:[/bold] {experiment.label}")
     console.print(f"[bold]Dataset:[/bold] {experiment.dataset}")
     console.print(f"[bold]Adapter:[/bold] {experiment.adapter}")
-    console.print(f"[bold]Agent Version:[/bold] {_metadata_value(experiment.agent_version)}")
-    console.print(f"[bold]Prompt Variant:[/bold] {_metadata_value(experiment.prompt_variant)}")
+    console.print(
+        f"[bold]Agent Version:[/bold] {_metadata_value(experiment.agent_version)}"
+    )
+    console.print(
+        f"[bold]Prompt Variant:[/bold] {_metadata_value(experiment.prompt_variant)}"
+    )
     console.print(f"[bold]Model:[/bold] {_metadata_value(experiment.model)}")
     console.print(f"[bold]Notes:[/bold] {_metadata_value(experiment.notes)}")
     console.print(
@@ -590,8 +635,7 @@ def _render_experiment_comparison(comparison: ExperimentComparison) -> None:
         console.print("[bold]Compatibility:[/bold] [green]EQUIVALENT[/green]")
     else:
         console.print(
-            "[bold]Compatibility:[/bold] "
-            "[yellow]NON-EQUIVALENT COMPARISON[/yellow]"
+            "[bold]Compatibility:[/bold] [yellow]NON-EQUIVALENT COMPARISON[/yellow]"
         )
         for warning in comparison.compatibility.warnings:
             console.print(f"[yellow]Warning: {warning}[/yellow]")
@@ -775,11 +819,21 @@ def _render_trace(
             if event.data.get("status") == "error":
                 status = "[red]ERROR[/red]"
             else:
-                status = "[green]PASS[/green]" if event.data.get("passed") else "[red]FAIL[/red]"
+                status = (
+                    "[green]PASS[/green]"
+                    if event.data.get("passed")
+                    else "[red]FAIL[/red]"
+                )
         elif event.event_type == "agent_end":
-            status = "[green]OK[/green]" if event.data.get("status") == "ok" else "[red]ERROR[/red]"
+            status = (
+                "[green]OK[/green]"
+                if event.data.get("status") == "ok"
+                else "[red]ERROR[/red]"
+            )
         elif event.event_type == "run_end":
-            status = "[green]PASS[/green]" if event.data.get("passed") else "[red]FAIL[/red]"
+            status = (
+                "[green]PASS[/green]" if event.data.get("passed") else "[red]FAIL[/red]"
+            )
         elif event.event_type == "error":
             status = "[red]ERROR[/red]"
 
@@ -791,7 +845,9 @@ def _render_trace(
             detail = str(diagnostics["failure_type"]).upper()
             if diagnostics.get("failure_phase"):
                 detail += f" / {diagnostics['failure_phase']}"
-        table.add_row(str(event.sequence), event.event_type, status, elapsed_text, detail)
+        table.add_row(
+            str(event.sequence), event.event_type, status, elapsed_text, detail
+        )
 
     console.print(table)
     _render_failure_diagnostics(events)

@@ -144,7 +144,9 @@ def test_stats_case_ids_and_run_filters() -> None:
         assert storage.list_case_ids() == ("case-a", "case-b")
         assert [run.run_id for run in storage.list_runs(status="PASS")] == ["passing"]
         assert [run.run_id for run in storage.list_runs(status="FAIL")] == ["failing"]
-        assert [run.run_id for run in storage.list_runs(case_id="case-b")] == ["failing"]
+        assert [run.run_id for run in storage.list_runs(case_id="case-b")] == [
+            "failing"
+        ]
         assert storage.list_runs(status="PASS", case_id="case-b") == ()
 
         with pytest.raises(ValueError, match="status must be"):
@@ -233,7 +235,9 @@ def test_cli_eval_persists_completed_run(monkeypatch) -> None:
         case = EvalCase("case-001", "repository", "fix it")
         monkeypatch.setenv("AGENTLAB_DB_PATH", str(database))
         monkeypatch.setattr("agentlab.cli.load_dataset", lambda _dataset: [case])
-        monkeypatch.setattr("agentlab.cli.evaluate_case", lambda _case: completed)
+        monkeypatch.setattr(
+            "agentlab.cli.evaluate_case", lambda _case, **_kwargs: completed
+        )
 
         result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
         stored = SQLiteStorage(database).get_run("eval-persisted-run")
