@@ -1,4 +1,5 @@
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -179,6 +180,120 @@ def test_duplicate_run_id_is_rejected() -> None:
             storage.save_run(result, "dataset.yaml")
 
 
+def test_idempotent_run_persistence_accepts_exact_replay_and_rejects_conflict() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-storage-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+        result = make_result("finalizing-run")
+        result = replace(
+            result,
+            trace=(
+                result.trace[0],
+                result.trace[1],
+                TraceEvent(
+                    result.run_id,
+                    3,
+                    "evaluator_end",
+                    result.trace[-1].timestamp,
+                    {
+                        "evaluator": "FakeEvaluator",
+                        "status": "pass",
+                        "passed": True,
+                        "score": 0.9,
+                        "feedback": "accepted",
+                        "metadata": {"source": "test"},
+                        "elapsed_time": 0.1,
+                    },
+                ),
+                replace(result.trace[-1], sequence=4),
+            ),
+        )
+
+        storage.save_run_idempotently(result, "dataset.yaml")
+        storage.save_run_idempotently(result, "dataset.yaml")
+
+        assert [run.run_id for run in storage.list_runs()] == ["finalizing-run"]
+        assert [event.sequence for event in storage.get_trace_events("finalizing-run")] == [
+            1,
+            2,
+            3,
+            4,
+        ]
+        assert len(storage.get_evaluator_outcomes("finalizing-run")) == 1
+        with pytest.raises(StorageError, match="conflicts"):
+            storage.save_run_idempotently(result, "different-dataset.yaml")
+
+
+def test_storage_rejects_contradictory_result_and_trace_invariants() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-storage-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+
+        with pytest.raises(ValueError, match="no error"):
+            storage.save_run(
+                make_result("pass-with-error", error="contradiction"),
+                "dataset.yaml",
+            )
+
+        mismatched_end = make_result("mismatched-end")
+        mismatched_trace = tuple(
+            replace(event, data={**event.data, "passed": False})
+            if event.event_type == "run_end"
+            else event
+            for event in mismatched_end.trace
+        )
+        with pytest.raises(ValueError, match="run_end passed"):
+            storage.save_run(
+                replace(mismatched_end, trace=mismatched_trace),
+                "dataset.yaml",
+            )
+
+        mismatched_tests = make_result("mismatched-tests")
+        mismatched_test_trace = tuple(
+            replace(
+                event,
+                data={**event.data, "tests_after_passed": False},
+            )
+            if event.event_type == "run_end"
+            else event
+            for event in mismatched_tests.trace
+        )
+        with pytest.raises(ValueError, match="tests_after_passed"):
+            storage.save_run(
+                replace(mismatched_tests, trace=mismatched_test_trace),
+                "dataset.yaml",
+            )
+
+        failed_contract = make_result("failed-contract")
+        failed_contract_trace = tuple(
+            replace(
+                event,
+                data={**event.data, "workspace_changes_passed": False},
+            )
+            if event.event_type == "run_end"
+            else event
+            for event in failed_contract.trace
+        )
+        with pytest.raises(ValueError, match="workspace-change contract"):
+            storage.save_run(
+                replace(failed_contract, trace=failed_contract_trace),
+                "dataset.yaml",
+            )
+
+        noncontiguous = make_result("noncontiguous")
+        broken_trace = tuple(
+            replace(event, sequence=4) if event.sequence == 3 else event
+            for event in noncontiguous.trace
+        )
+        with pytest.raises(ValueError, match="unique and contiguous"):
+            storage.save_run(
+                replace(noncontiguous, trace=broken_trace),
+                "dataset.yaml",
+            )
+
+        nonfinite = make_result("nonfinite", latency=float("nan"))
+        with pytest.raises(ValueError, match="finite non-negative"):
+            storage.save_run(nonfinite, "dataset.yaml")
+
+
 def test_secret_is_never_written_to_sqlite(monkeypatch) -> None:
     secret = "storage-secret-value-987654"
     monkeypatch.setenv("REPO_DOCTOR_API_KEY", secret)
@@ -188,6 +303,7 @@ def test_secret_is_never_written_to_sqlite(monkeypatch) -> None:
         result = make_result(
             "secret-run",
             case_id=f"case-{secret}",
+            passed=False,
             error=f"password={secret}",
             extra_data={
                 "stdout": f"Authorization: Bearer {secret}",
@@ -239,7 +355,9 @@ def test_cli_eval_persists_completed_run(monkeypatch) -> None:
             "agentlab.cli.evaluate_case", lambda _case, **_kwargs: completed
         )
 
-        result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
+        result = CliRunner().invoke(
+            app, ["eval", "dataset.yaml", "--agent", "mock_agent"]
+        )
         stored = SQLiteStorage(database).get_run("eval-persisted-run")
 
         assert result.exit_code == 0

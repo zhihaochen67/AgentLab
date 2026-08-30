@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from agentlab.adapters import AgentAdapter, AgentRunResult
 from agentlab.cli import app
+from agentlab.execution_sessions import ExecutionStatus
 from agentlab.models import (
     CaseExperimentMetrics,
     EvalCase,
@@ -63,7 +64,9 @@ def test_database_write_failure_does_not_leak_workspace(monkeypatch) -> None:
         )
         monkeypatch.setattr("agentlab.cli._open_storage", lambda: FailingStorage())
 
-        result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
+        result = CliRunner().invoke(
+            app, ["eval", "dataset.yaml", "--agent", "mock_agent"]
+        )
 
         assert result.exit_code == 1
         assert "Could not persist run" in result.stdout
@@ -282,6 +285,71 @@ def test_cli_lists_available_agents() -> None:
     assert "AI coding repair agent evaluated by AgentLab" in result.stdout
 
 
+def test_cli_input_errors_are_concise_and_do_not_render_tracebacks() -> None:
+    missing = CliRunner().invoke(
+        app,
+        ["eval", "does-not-exist.yaml", "--agent", "mock_agent"],
+    )
+    unknown = CliRunner().invoke(
+        app,
+        ["eval", "does-not-exist.yaml", "--agent", "no-such-agent"],
+    )
+
+    assert missing.exit_code == 1
+    assert "Could not start evaluation" in missing.stdout
+    assert "Cannot read dataset" in missing.stdout
+    assert "Traceback" not in missing.stdout
+    assert unknown.exit_code == 1
+    assert "Unknown agent: no-such-agent" in unknown.stdout
+    assert "Traceback" not in unknown.stdout
+
+
+def test_cli_execution_history_is_inspectable(monkeypatch) -> None:
+    timestamp = "2026-08-28T00:00:00+00:00"
+    session = SimpleNamespace(
+        execution_id="a" * 32,
+        run_id="run-1",
+        case=SimpleNamespace(id="case-a"),
+        adapter="repo_doctor",
+        status=SimpleNamespace(value="WAITING_FOR_APPROVAL"),
+        resume_handle=SimpleNamespace(reason="approval_required"),
+        dataset="dataset.yaml",
+        created_at=timestamp,
+        updated_at="2026-08-28T00:01:00+00:00",
+        elapsed_seconds=1.0,
+        trace=(
+            TraceEvent(
+                "run-1",
+                1,
+                "run_start",
+                timestamp,
+                {"case_id": "case-a", "adapter": "RepoDoctorAdapter"},
+            ),
+            TraceEvent(
+                "run-1",
+                2,
+                "run_suspended",
+                timestamp,
+                {"reason": "approval_required", "elapsed_time": 1.0},
+            ),
+        ),
+    )
+    monkeypatch.setattr("agentlab.cli.list_execution_sessions", lambda limit: (session,))
+    monkeypatch.setattr("agentlab.cli.load_execution_session", lambda _value: session)
+
+    listing = CliRunner().invoke(app, ["executions"])
+    detail = CliRunner().invoke(app, ["execution-show", "a" * 32])
+
+    assert listing.exit_code == 0
+    assert "WAITING_FOR_APPROVAL" in listing.stdout
+    assert "case-a" in listing.stdout
+    assert detail.exit_code == 0
+    assert "Trace events: 2" in detail.stdout
+    assert "approval_required" in detail.stdout
+    assert "run_suspended" in detail.stdout
+    assert "WAITING" in detail.stdout
+
+
 def test_cli_experiment_accepts_agent_selection(
     monkeypatch,
     fake_repo_doctor_project: Path,
@@ -436,6 +504,7 @@ def test_cli_resume_uses_stored_context_and_persists_completion(
         evaluator=None,
         database_path=str(database),
         dataset="dataset.yaml",
+        status=ExecutionStatus.WAITING_FOR_APPROVAL,
     )
     timestamp = "2026-08-28T00:00:00+00:00"
     trace = (
@@ -451,17 +520,18 @@ def test_cli_resume_uses_stored_context_and_persists_completion(
             2,
             "run_end",
             timestamp,
-            {"elapsed_time": 1.0},
+            {"passed": True, "elapsed_time": 1.0},
         ),
     )
     completed = EvalResult("case-a", True, False, True, run_id="run-1", trace=trace)
     observed = {}
     monkeypatch.setattr(
-        "agentlab.cli.load_active_execution_session", lambda value: session
+        "agentlab.cli.load_execution_session", lambda value: session
     )
 
     def fake_resume(value, *, adapter, evaluator):
         observed.update(value=value, adapter=adapter.info.name, evaluator=evaluator)
+        SQLiteStorage(database).save_run_idempotently(completed, "dataset.yaml")
         return completed
 
     monkeypatch.setattr("agentlab.cli.resume_evaluation", fake_resume)
@@ -478,7 +548,7 @@ def test_cli_resume_rejects_invalid_or_replayed_execution(monkeypatch) -> None:
 
         raise ExecutionSessionError("terminal and cannot be replayed")
 
-    monkeypatch.setattr("agentlab.cli.load_active_execution_session", rejected)
+    monkeypatch.setattr("agentlab.cli.load_execution_session", rejected)
     result = CliRunner().invoke(app, ["resume", "b" * 32])
     assert result.exit_code == 1
     assert "cannot be replayed" in " ".join(result.stdout.split())

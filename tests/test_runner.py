@@ -1,12 +1,23 @@
+import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from agentlab.adapters import AgentAdapter, AgentRunResult
 from agentlab.dataset import load_dataset
 from agentlab.evaluators import EvaluationOutcome, Evaluator, LLMJudgeEvaluator
 from agentlab.models import EvalCase
-from agentlab.runner import create_workspace, evaluate_case
+from agentlab.runner import (
+    PytestTimeoutError,
+    UnsupportedWorkspaceSymlinkError,
+    create_workspace,
+    evaluate_case,
+    run_pytest,
+    workspace_manifest,
+)
 from agentlab.storage import SQLiteStorage
 
 
@@ -103,6 +114,65 @@ def test_workspace_is_an_isolated_copy() -> None:
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_directory_symlink_is_rejected_before_workspace_copy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = tmp_path / "repository"
+    real_directory = repository / "realdir"
+    real_directory.mkdir(parents=True)
+    (real_directory / "value.txt").write_text("value\n", encoding="utf-8")
+    link = repository / "linked-directory"
+    _symlink_or_skip(link, real_directory, target_is_directory=True)
+
+    monkeypatch.setattr(
+        "agentlab.runner.shutil.copytree",
+        lambda *_args, **_kwargs: pytest.fail(
+            "workspace copy must not start before symlink validation"
+        ),
+    )
+
+    with pytest.raises(
+        UnsupportedWorkspaceSymlinkError,
+        match="directory symlinks are unsupported.*linked-directory",
+    ):
+        create_workspace(str(repository))
+
+
+def test_regular_file_symlink_copy_and_manifest_semantics_are_consistent(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    target = repository / "target.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    link = repository / "linked.py"
+    _symlink_or_skip(link, target, target_is_directory=False)
+
+    source_manifest = workspace_manifest(repository)
+    workspace = create_workspace(str(repository))
+    try:
+        assert not (workspace / "linked.py").is_symlink()
+        assert (workspace / "linked.py").read_bytes() == target.read_bytes()
+        assert workspace_manifest(workspace) == source_manifest
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as error:
+        if os.name == "nt":
+            pytest.skip(f"Windows symlink privilege is unavailable: {error}")
+        raise
+
+
 def test_evaluate_case_runs_before_agent_and_after() -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
         repository = make_failing_repository(Path(directory))
@@ -138,6 +208,76 @@ def test_evaluate_case_runs_before_agent_and_after() -> None:
         assert result.trace[4].data["returncode"] == 0
         assert result.trace[6].data["passed"] is True
         assert result.trace[-1].data["final_status"] == "pass"
+
+
+def test_declared_workspace_change_contract_is_enforced() -> None:
+    class TamperingAdapter(FixingAdapter):
+        def repair(self, workspace: Path, task: str) -> AgentRunResult:
+            result = super().repair(workspace, task)
+            (workspace / "test_calculator.py").write_text(
+                "def test_trivial():\n    assert True\n",
+                encoding="utf-8",
+            )
+            return result
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+        result = evaluate_case(
+            EvalCase(
+                "addition",
+                str(repository),
+                "Fix addition",
+                {"modified_files": ["calculator.py"]},
+            ),
+            adapter=TamperingAdapter(),
+        )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert result.error is not None
+    assert "unexpected files changed: test_calculator.py" in result.error
+    verification = next(
+        event
+        for event in result.trace
+        if event.event_type == "workspace_verification_end"
+    )
+    assert verification.data == {
+        "status": "fail",
+        "passed": False,
+        "modified_file_count": 2,
+        "modified_files": ["calculator.py", "test_calculator.py"],
+        "missing_expected_files": [],
+        "unexpected_files": ["test_calculator.py"],
+        "paths_truncated": False,
+        "elapsed_time": verification.data["elapsed_time"],
+    }
+    assert result.trace[-1].data["failure_reason"] == "workspace_contract_failed"
+
+
+def test_declared_workspace_change_contract_passes_exact_repair() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        repository = make_failing_repository(Path(directory))
+        result = evaluate_case(
+            EvalCase(
+                "addition",
+                str(repository),
+                "Fix addition",
+                {"modified_files": ["calculator.py"]},
+            ),
+            adapter=FixingAdapter(),
+        )
+
+    assert result.passed is True
+    assert [
+        event.event_type
+        for event in result.trace
+        if event.event_type.startswith("workspace_")
+    ] == [
+        "workspace_baseline",
+        "workspace_verification_start",
+        "workspace_verification_end",
+    ]
+    assert result.trace[-1].data["workspace_changes_passed"] is True
 
 
 def test_agent_trace_records_variant_metadata_without_full_prompt() -> None:
@@ -210,6 +350,16 @@ def test_pytest_exception_records_error_and_run_end(monkeypatch) -> None:
         ]
         assert result.trace[2].data["status"] == "error"
         assert result.trace[3].data["phase"] == "pytest_before"
+
+
+def test_pytest_gate_has_a_clear_timeout_failure(monkeypatch, tmp_path: Path) -> None:
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["pytest"], timeout=120)
+
+    monkeypatch.setattr("agentlab.runner.run_process", timeout)
+
+    with pytest.raises(PytestTimeoutError, match="120-second limit"):
+        run_pytest(tmp_path)
 
 
 def test_trace_redacts_secret_from_task_and_agent_output(monkeypatch) -> None:

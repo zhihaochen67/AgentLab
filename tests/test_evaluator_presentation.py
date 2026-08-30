@@ -614,7 +614,7 @@ def test_report_json_serializes_from_persisted_evaluator_data() -> None:
                 ),
                 TraceEvent(
                     "smoke-run",
-                    5,
+                    2,
                     "evaluator_end",
                     _FINISHED_AT,
                     {
@@ -629,7 +629,7 @@ def test_report_json_serializes_from_persisted_evaluator_data() -> None:
                 ),
                 TraceEvent(
                     "smoke-run",
-                    99,
+                    3,
                     "run_end",
                     _FINISHED_AT,
                     {"passed": True, "elapsed_time": 1.0},

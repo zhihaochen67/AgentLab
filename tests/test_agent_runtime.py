@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import agentlab.runner as runner_module
 from agentlab.adapters import (
     AgentAdapter,
     AgentExecutionError,
@@ -20,9 +22,12 @@ from agentlab.adapters.repo_doctor import WORKSPACE_MARKER, RepoDoctorAdapter
 from agentlab.execution_sessions import (
     ExecutionSessionError,
     ExecutionStatus,
+    execution_session_lock,
+    list_execution_sessions,
     load_active_execution_session,
     load_execution_session,
     save_execution_session,
+    update_execution_status,
 )
 from agentlab.models import EvalCase, EvalResult, EvaluationSuspended
 from agentlab.runner import (
@@ -30,9 +35,15 @@ from agentlab.runner import (
     PytestRunResult,
     evaluate_case,
     resume_evaluation,
+    workspace_manifest,
+    workspace_manifest_digest,
 )
 from agentlab.storage import SQLiteStorage
 from agentlab.tracer import TraceEvent
+
+
+class SimulatedCrash(BaseException):
+    pass
 
 
 class ResumableAgent(AgentAdapter):
@@ -97,7 +108,11 @@ def _suspend(
         "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(False)
     )
     result = evaluate_case(
-        _case(tmp_path), adapter=active, state_root=tmp_path / "state"
+        _case(tmp_path),
+        adapter=active,
+        dataset="dataset.yaml",
+        database_path=tmp_path / "agentlab.db",
+        state_root=tmp_path / "state",
     )
     assert isinstance(result, EvaluationSuspended)
     return active, result
@@ -157,7 +172,6 @@ def test_successful_resume_preserves_run_workspace_and_persists_final_run(
     )
 
     storage = SQLiteStorage(tmp_path / "agentlab.db")
-    storage.save_run(result, "dataset.yaml")
     assert storage.get_run(result.run_id).status == "PASS"
     with pytest.raises(ExecutionSessionError, match="terminal"):
         load_active_execution_session(suspended.execution_id, root=tmp_path / "state")
@@ -192,6 +206,322 @@ def test_resume_can_suspend_again_without_restart_or_cleanup(
     assert updated.status is ExecutionStatus.WAITING_FOR_APPROVAL
     assert "run_end" not in [event.event_type for event in updated.trace]
     shutil.rmtree(workspace)
+
+
+def test_interrupted_resuming_session_can_be_recovered(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter, suspended = _suspend(tmp_path, monkeypatch)
+    root = tmp_path / "state"
+    session = load_execution_session(suspended.execution_id, root=root)
+    update_execution_status(session, ExecutionStatus.RESUMING, root=root)
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
+    )
+
+    result = resume_evaluation(
+        suspended.execution_id,
+        adapter=adapter,
+        state_root=root,
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.passed is True
+    assert adapter.resume_calls == 1
+    assert load_execution_session(suspended.execution_id, root=root).status is (
+        ExecutionStatus.COMPLETED
+    )
+
+
+def test_crash_after_agent_checkpoint_recovers_without_repeating_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter, suspended = _suspend(tmp_path, monkeypatch)
+    root = tmp_path / "state"
+    database = tmp_path / "agentlab.db"
+    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
+    )
+    original_save = save_execution_session
+    crashed = False
+
+    def crash_after_checkpoint(session, *, root=None):
+        nonlocal crashed
+        path = original_save(session, root=root)
+        if session.status is ExecutionStatus.VERIFYING and not crashed:
+            crashed = True
+            raise SimulatedCrash
+        return path
+
+    monkeypatch.setattr(
+        "agentlab.runner.save_execution_session", crash_after_checkpoint
+    )
+    with pytest.raises(SimulatedCrash):
+        resume_evaluation(
+            suspended.execution_id,
+            adapter=adapter,
+            state_root=root,
+        )
+
+    checkpoint = load_execution_session(suspended.execution_id, root=root)
+    assert checkpoint.status is ExecutionStatus.VERIFYING
+    assert checkpoint.trace[-1].event_type == "agent_end"
+    assert adapter.resume_calls == 1
+    assert workspace.is_dir()
+    assert SQLiteStorage(database).get_run(suspended.run_id) is None
+
+    monkeypatch.setattr("agentlab.runner.save_execution_session", original_save)
+    result = resume_evaluation(
+        suspended.execution_id,
+        adapter=adapter,
+        state_root=root,
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.run_id == suspended.run_id
+    assert adapter.resume_calls == 1
+    assert [event.sequence for event in result.trace] == list(
+        range(1, len(result.trace) + 1)
+    )
+    assert [event.event_type for event in result.trace].count("resume_start") == 1
+    assert SQLiteStorage(database).get_run(suspended.run_id) is not None
+    assert load_execution_session(suspended.execution_id, root=root).status is (
+        ExecutionStatus.COMPLETED
+    )
+    assert not workspace.exists()
+
+
+def test_finalizing_snapshot_recovers_before_sqlite_without_repeating_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter, suspended = _suspend(tmp_path, monkeypatch)
+    root = tmp_path / "state"
+    database = tmp_path / "agentlab.db"
+    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
+    )
+    original_persist = SQLiteStorage.save_run_idempotently
+
+    def crash_before_sqlite(self, result, dataset):
+        raise SimulatedCrash
+
+    monkeypatch.setattr(SQLiteStorage, "save_run_idempotently", crash_before_sqlite)
+    with pytest.raises(SimulatedCrash):
+        resume_evaluation(
+            suspended.execution_id,
+            adapter=adapter,
+            state_root=root,
+        )
+
+    finalizing = load_execution_session(suspended.execution_id, root=root)
+    assert finalizing.status is ExecutionStatus.FINALIZING
+    assert finalizing.final_result is not None
+    assert finalizing.trace[-1].event_type == "run_end"
+    assert adapter.resume_calls == 1
+    assert workspace.is_dir()
+    assert SQLiteStorage(database).get_run(suspended.run_id) is None
+
+    monkeypatch.setattr(SQLiteStorage, "save_run_idempotently", original_persist)
+    result = resume_evaluation(
+        suspended.execution_id,
+        adapter=adapter,
+        state_root=root,
+    )
+
+    stored = SQLiteStorage(database)
+    assert isinstance(result, EvalResult)
+    assert result.run_id == suspended.run_id
+    assert adapter.resume_calls == 1
+    assert [event.sequence for event in result.trace] == list(
+        range(1, len(result.trace) + 1)
+    )
+    assert stored.get_run(suspended.run_id) is not None
+    assert stored.get_trace_events(suspended.run_id) == result.trace
+    assert load_execution_session(suspended.execution_id, root=root).status is (
+        ExecutionStatus.COMPLETED
+    )
+    assert not workspace.exists()
+
+
+def test_sqlite_commit_then_cleanup_crash_is_idempotently_recovered(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter, suspended = _suspend(tmp_path, monkeypatch)
+    root = tmp_path / "state"
+    database = tmp_path / "agentlab.db"
+    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
+    )
+    original_cleanup = runner_module._cleanup_workspace
+
+    def crash_before_cleanup(_workspace):
+        raise SimulatedCrash
+
+    monkeypatch.setattr(runner_module, "_cleanup_workspace", crash_before_cleanup)
+    with pytest.raises(SimulatedCrash):
+        resume_evaluation(
+            suspended.execution_id,
+            adapter=adapter,
+            state_root=root,
+        )
+
+    storage = SQLiteStorage(database)
+    persisted_events = storage.get_trace_events(suspended.run_id)
+    assert storage.get_run(suspended.run_id) is not None
+    assert load_execution_session(suspended.execution_id, root=root).status is (
+        ExecutionStatus.FINALIZING
+    )
+    assert workspace.is_dir()
+    assert adapter.resume_calls == 1
+
+    monkeypatch.setattr(runner_module, "_cleanup_workspace", original_cleanup)
+    result = resume_evaluation(
+        suspended.execution_id,
+        adapter=adapter,
+        state_root=root,
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.run_id == suspended.run_id
+    assert adapter.resume_calls == 1
+    assert storage.get_trace_events(suspended.run_id) == persisted_events
+    assert len(storage.list_runs()) == 1
+    assert load_execution_session(suspended.execution_id, root=root).status is (
+        ExecutionStatus.COMPLETED
+    )
+    assert not workspace.exists()
+
+
+def test_resume_lock_rejects_concurrent_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter, suspended = _suspend(tmp_path, monkeypatch)
+    root = tmp_path / "state"
+    session = load_execution_session(suspended.execution_id, root=root)
+    try:
+        with (
+            execution_session_lock(suspended.execution_id, root=root),
+            pytest.raises(ExecutionSessionError, match="already being resumed"),
+        ):
+            resume_evaluation(
+                suspended.execution_id,
+                adapter=adapter,
+                state_root=root,
+            )
+        assert adapter.resume_calls == 0
+        assert list_execution_sessions(root=root) == (session,)
+    finally:
+        shutil.rmtree(session.workspace, ignore_errors=True)
+
+
+def test_resume_rejects_changed_original_repository(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter = ResumableAgent()
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(False)
+    )
+    case = _case(tmp_path)
+    case.expected = {"modified_files": ["completed.txt"]}
+    suspended = evaluate_case(case, adapter=adapter, state_root=tmp_path / "state")
+    assert isinstance(suspended, EvaluationSuspended)
+    session = load_execution_session(suspended.execution_id, root=tmp_path / "state")
+    (Path(case.repository) / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    try:
+        with pytest.raises(ExecutionSessionError, match="changed while execution"):
+            resume_evaluation(
+                suspended.execution_id,
+                adapter=adapter,
+                state_root=tmp_path / "state",
+            )
+        unchanged = load_execution_session(
+            suspended.execution_id, root=tmp_path / "state"
+        )
+        assert unchanged.status is ExecutionStatus.WAITING_FOR_APPROVAL
+    finally:
+        shutil.rmtree(session.workspace, ignore_errors=True)
+
+
+def test_resume_rejects_legacy_directory_symlink_before_baseline_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter = ResumableAgent()
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(False)
+    )
+    case = _case(tmp_path)
+    case.expected = {"modified_files": ["completed.txt"]}
+    suspended = evaluate_case(
+        case,
+        adapter=adapter,
+        dataset="dataset.yaml",
+        database_path=tmp_path / "agentlab.db",
+        state_root=tmp_path / "state",
+    )
+    assert isinstance(suspended, EvaluationSuspended)
+    root = tmp_path / "state"
+    session = load_execution_session(suspended.execution_id, root=root)
+    workspace = Path(session.workspace)
+    source = Path(case.repository)
+    source_real = source / "realdir"
+    source_real.mkdir()
+    (source_real / "value.txt").write_text("value\n", encoding="utf-8")
+    source_link = source / "linked-directory"
+    _symlink_or_skip(source_link, source_real, target_is_directory=True)
+
+    workspace_real = workspace / "realdir"
+    workspace_link = workspace / "linked-directory"
+    workspace_real.mkdir()
+    workspace_link.mkdir()
+    for directory in (workspace_real, workspace_link):
+        (directory / "value.txt").write_text("value\n", encoding="utf-8")
+    legacy = replace(
+        session,
+        baseline_digest=workspace_manifest_digest(workspace_manifest(workspace)),
+    )
+    save_execution_session(legacy, root=root)
+
+    try:
+        with pytest.raises(
+            ExecutionSessionError,
+            match="directory symlinks are unsupported.*linked-directory",
+        ) as captured:
+            resume_evaluation(
+                suspended.execution_id,
+                adapter=adapter,
+                state_root=root,
+            )
+        assert "changed while execution" not in str(captured.value)
+        assert adapter.resume_calls == 0
+        assert load_execution_session(suspended.execution_id, root=root).status is (
+            ExecutionStatus.WAITING_FOR_APPROVAL
+        )
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as error:
+        if os.name == "nt":
+            pytest.skip(f"Windows symlink privilege is unavailable: {error}")
+        raise
 
 
 def test_terminal_failure_after_resume_is_final_and_cleans_workspace(

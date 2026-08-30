@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from abc import ABC, abstractmethod
@@ -109,6 +110,46 @@ def _evaluator_experiment_metrics(
             )
         )
     return tuple(metrics)
+
+
+def _failure_reason_from_trace(
+    events: list[tuple[str | None, str | None]],
+) -> str:
+    """Classify a failed run from persisted evidence, including legacy traces."""
+    decoded: list[tuple[str, dict[str, Any]]] = []
+    for event_type, data_json in events:
+        if event_type is None or data_json is None:
+            continue
+        try:
+            data = json.loads(data_json)
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        decoded.append((event_type, data if isinstance(data, dict) else {}))
+
+    for event_type, data in decoded:
+        if event_type != "agent_end":
+            continue
+        diagnostics = diagnostics_from_trace_data(data)
+        if diagnostics and diagnostics.get("failure_type"):
+            return str(diagnostics["failure_type"])
+    for event_type, data in reversed(decoded):
+        if event_type == "run_end" and isinstance(data.get("failure_reason"), str):
+            return str(data["failure_reason"])
+    for event_type, data in reversed(decoded):
+        if event_type == "error":
+            phase = data.get("phase")
+            return f"{phase}_error" if isinstance(phase, str) else "runtime_error"
+    for event_type, data in reversed(decoded):
+        if event_type == "workspace_verification_end" and data.get("passed") is False:
+            return "workspace_contract_failed"
+        if event_type == "evaluator_end":
+            if data.get("status") == "error":
+                return "evaluator_error"
+            if data.get("passed") is False:
+                return "evaluator_failed"
+        if event_type == "pytest_after_end" and data.get("passed") is False:
+            return "tests_after_failed"
+    return "unknown_failure"
 
 
 class StorageError(RuntimeError):
@@ -335,12 +376,92 @@ class SQLiteStorage(RunStorage):
         if "trial_index" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN trial_index INTEGER")
 
-    @staticmethod
-    def _required_event(result: EvalResult, event_type: str) -> TraceEvent:
-        event = next((item for item in result.trace if item.event_type == event_type), None)
-        if event is None:
-            raise ValueError(f"Evaluation trace is missing required event: {event_type}")
-        return event
+    @classmethod
+    def _validated_trace(
+        cls,
+        result: EvalResult,
+    ) -> tuple[TraceEvent, TraceEvent, tuple[TraceEvent, ...], float]:
+        if not isinstance(result.run_id, str) or not result.run_id:
+            raise ValueError("EvalResult.run_id must be non-empty text.")
+        for name, value in (
+            ("passed", result.passed),
+            ("tests_before_passed", result.tests_before_passed),
+            ("tests_after_passed", result.tests_after_passed),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"EvalResult.{name} must be a boolean.")
+        if result.passed and (not result.tests_after_passed or result.error is not None):
+            raise ValueError(
+                "A passing EvalResult requires passing post-tests and no error."
+            )
+
+        ordered = tuple(sorted(result.trace, key=lambda event: event.sequence))
+        if not ordered:
+            raise ValueError("Evaluation trace must not be empty.")
+        if any(
+            isinstance(event.sequence, bool) or not isinstance(event.sequence, int)
+            for event in ordered
+        ):
+            raise TypeError("Trace sequence numbers must be integers.")
+        if tuple(event.sequence for event in ordered) != tuple(
+            range(1, len(ordered) + 1)
+        ):
+            raise ValueError("Trace sequence numbers must be unique and contiguous.")
+        if any(event.run_id != result.run_id for event in ordered):
+            raise ValueError("Every trace event must match EvalResult.run_id.")
+        if any(not isinstance(event.data, dict) for event in ordered):
+            raise TypeError("Every trace event data value must be an object.")
+
+        starts = tuple(event for event in ordered if event.event_type == "run_start")
+        ends = tuple(event for event in ordered if event.event_type == "run_end")
+        if len(starts) != 1 or starts[0].sequence != 1:
+            raise ValueError("Evaluation trace must start with exactly one run_start.")
+        if len(ends) != 1 or ends[0].sequence != len(ordered):
+            raise ValueError("Evaluation trace must end with exactly one run_end.")
+        start, end = starts[0], ends[0]
+        start_case = start.data.get("case_id")
+        end_case = end.data.get("case_id")
+        if start_case is not None and start_case != result.case_id:
+            raise ValueError("run_start case_id does not match EvalResult.case_id.")
+        if end_case is not None and end_case != result.case_id:
+            raise ValueError("run_end case_id does not match EvalResult.case_id.")
+        end_passed = end.data.get("passed")
+        if not isinstance(end_passed, bool) or end_passed is not result.passed:
+            raise ValueError("run_end passed does not match EvalResult.passed.")
+        for name, expected in (
+            ("tests_before_passed", result.tests_before_passed),
+            ("tests_after_passed", result.tests_after_passed),
+        ):
+            recorded = end.data.get(name)
+            if recorded is not None and (
+                not isinstance(recorded, bool) or recorded is not expected
+            ):
+                raise ValueError(f"run_end {name} does not match EvalResult.{name}.")
+        workspace_changes_passed = end.data.get("workspace_changes_passed")
+        if workspace_changes_passed is not None and not isinstance(
+            workspace_changes_passed, bool
+        ):
+            raise TypeError("run_end workspace_changes_passed must be a boolean.")
+        if result.passed and workspace_changes_passed is False:
+            raise ValueError(
+                "A passing EvalResult cannot have a failed workspace-change contract."
+            )
+        failure_reason = end.data.get("failure_reason")
+        if result.passed and failure_reason not in {None, ""}:
+            raise ValueError("A passing EvalResult cannot have a failure reason.")
+        final_status = end.data.get("final_status")
+        expected_status = "pass" if result.passed else "fail"
+        if final_status is not None and final_status != expected_status:
+            raise ValueError("run_end final_status does not match EvalResult.passed.")
+        total_latency = end.data.get("elapsed_time")
+        if (
+            isinstance(total_latency, bool)
+            or not isinstance(total_latency, (int, float))
+            or not math.isfinite(float(total_latency))
+            or total_latency < 0
+        ):
+            raise ValueError("run_end elapsed_time must be a finite non-negative number.")
+        return start, end, ordered, float(total_latency)
 
     _EVALUATOR_STATUSES = frozenset({"pass", "fail", "error"})
 
@@ -422,9 +543,10 @@ class SQLiteStorage(RunStorage):
                 raise ValueError(
                     f"{context} 'elapsed_time' must be numeric when present."
                 )
-            if elapsed_time < 0:
+            if not math.isfinite(float(elapsed_time)) or elapsed_time < 0:
                 raise ValueError(
-                    f"{context} 'elapsed_time' must be non-negative, got {elapsed_time!r}."
+                    f"{context} 'elapsed_time' must be finite and non-negative, "
+                    f"got {elapsed_time!r}."
                 )
             elapsed_time = float(elapsed_time)
 
@@ -435,6 +557,7 @@ class SQLiteStorage(RunStorage):
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
+                allow_nan=False,
             )
         except (TypeError, ValueError) as error:
             raise ValueError(f"{context} metadata is not JSON-serializable: {error}") from error
@@ -455,20 +578,13 @@ class SQLiteStorage(RunStorage):
     def save_run(self, result: EvalResult, dataset: str) -> None:
         if self.read_only:
             raise StorageError("Cannot save an evaluation run through read-only storage.")
-        start = self._required_event(result, "run_start")
-        end = self._required_event(result, "run_end")
-        mismatched = [event.sequence for event in result.trace if event.run_id != result.run_id]
-        if mismatched:
-            raise ValueError("Every trace event must match EvalResult.run_id.")
+        start, end, ordered_events, total_latency = self._validated_trace(result)
         if (result.experiment_id is None) != (result.trial_index is None):
             raise ValueError("experiment_id and trial_index must be set together.")
         if result.trial_index is not None and result.trial_index < 1:
             raise ValueError("trial_index must be at least 1.")
 
         adapter = str(start.data.get("adapter", "unknown"))
-        total_latency = end.data.get("elapsed_time", 0.0)
-        if not isinstance(total_latency, (int, float)):
-            raise TypeError("run_end elapsed_time must be numeric.")
 
         run_values = (
             result.run_id,
@@ -478,13 +594,14 @@ class SQLiteStorage(RunStorage):
             "PASS" if result.passed else "FAIL",
             summarize_text(start.timestamp),
             summarize_text(end.timestamp),
-            float(total_latency),
+            total_latency,
             int(result.tests_before_passed),
             int(result.tests_after_passed),
             summarize_text(result.error) if result.error is not None else None,
             result.experiment_id,
             result.trial_index,
         )
+        evaluator_values = self._evaluator_outcome_rows(result)
         event_values = [
             (
                 result.run_id,
@@ -496,12 +613,11 @@ class SQLiteStorage(RunStorage):
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
+                    allow_nan=False,
                 ),
             )
-            for event in sorted(result.trace, key=lambda item: item.sequence)
+            for event in ordered_events
         ]
-        evaluator_values = self._evaluator_outcome_rows(result)
-
         try:
             with self._connection() as connection:
                 connection.execute(
@@ -548,6 +664,72 @@ class SQLiteStorage(RunStorage):
                         )
         except sqlite3.Error as error:
             raise StorageError(f"Could not save evaluation run {result.run_id}: {error}") from error
+
+    def save_run_idempotently(self, result: EvalResult, dataset: str) -> None:
+        """Persist one run once, accepting only an exact committed replay."""
+        start, end, ordered_events, total_latency = self._validated_trace(result)
+        expected_run = StoredRun(
+            run_id=result.run_id,
+            case_id=summarize_text(result.case_id),
+            dataset=summarize_text(dataset),
+            adapter=summarize_text(str(start.data.get("adapter", "unknown"))),
+            status="PASS" if result.passed else "FAIL",
+            started_at=summarize_text(start.timestamp),
+            finished_at=summarize_text(end.timestamp),
+            total_latency=total_latency,
+            tests_before_passed=result.tests_before_passed,
+            tests_after_passed=result.tests_after_passed,
+            error=(
+                summarize_text(result.error) if result.error is not None else None
+            ),
+            experiment_id=result.experiment_id,
+            trial_index=result.trial_index,
+        )
+        expected_events = tuple(
+            TraceEvent(
+                run_id=result.run_id,
+                sequence=event.sequence,
+                event_type=summarize_text(event.event_type),
+                timestamp=summarize_text(event.timestamp),
+                data=sanitize_data(event.data),
+            )
+            for event in ordered_events
+        )
+        expected_outcomes = tuple(
+            StoredEvaluatorOutcome(
+                run_id=row[0],
+                sequence=row[1],
+                evaluator=row[2],
+                status=row[3],
+                passed=bool(row[4]),
+                score=row[5],
+                feedback=row[6],
+                metadata=json.loads(row[7]),
+                error_type=row[8],
+                elapsed_time=row[9],
+            )
+            for row in self._evaluator_outcome_rows(result)
+        )
+
+        existing = self.get_run(result.run_id)
+        if existing is None:
+            try:
+                self.save_run(result, dataset)
+            except StorageError:
+                existing = self.get_run(result.run_id)
+                if existing is None:
+                    raise
+            else:
+                existing = self.get_run(result.run_id)
+
+        if (
+            existing != expected_run
+            or self.get_trace_events(result.run_id) != expected_events
+            or self.get_evaluator_outcomes(result.run_id) != expected_outcomes
+        ):
+            raise StorageError(
+                f"Persisted run {result.run_id} conflicts with finalizing execution."
+            )
 
     def get_run(self, run_id: str) -> StoredRun | None:
         try:
@@ -869,13 +1051,12 @@ class SQLiteStorage(RunStorage):
                 ).fetchall()
                 failure_rows = connection.execute(
                     """
-                    SELECT trace_events.data_json
+                    SELECT runs.run_id, trace_events.event_type, trace_events.data_json
                     FROM runs
                     LEFT JOIN trace_events
                       ON trace_events.run_id = runs.run_id
-                     AND trace_events.event_type = 'agent_end'
                     WHERE runs.experiment_id = ? AND runs.status = 'FAIL'
-                    ORDER BY runs.rowid
+                    ORDER BY runs.rowid, trace_events.sequence
                     """,
                     (experiment_id,),
                 ).fetchall()
@@ -936,17 +1117,14 @@ class SQLiteStorage(RunStorage):
             )
             for case_id, values in sorted(case_totals.items())
         )
-        failure_counts: dict[str, int] = {}
+        failure_events: dict[str, list[tuple[str | None, str | None]]] = {}
         for row in failure_rows:
-            failure_type = "unknown_agent_error"
-            if row["data_json"] is not None:
-                try:
-                    data = json.loads(row["data_json"])
-                except (TypeError, json.JSONDecodeError):
-                    data = {}
-                diagnostics = diagnostics_from_trace_data(data)
-                if diagnostics and diagnostics.get("failure_type"):
-                    failure_type = str(diagnostics["failure_type"])
+            failure_events.setdefault(row["run_id"], []).append(
+                (row["event_type"], row["data_json"])
+            )
+        failure_counts: dict[str, int] = {}
+        for events in failure_events.values():
+            failure_type = _failure_reason_from_trace(events)
             failure_counts[failure_type] = failure_counts.get(failure_type, 0) + 1
 
         total_runs = len(rows)

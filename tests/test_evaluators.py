@@ -1,8 +1,10 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from agentlab.evaluators import (
+    EvaluationOutcome,
     JudgeResponseError,
     JudgeVerdict,
     LLMJudgeEvaluator,
@@ -54,6 +56,38 @@ def test_pytest_evaluator_fails_for_red_test_suite(tmp_path: Path) -> None:
     assert outcome.score == 0.0
     assert outcome.metadata["evaluator"] == "pytest"
     assert outcome.metadata["returncode"] != 0
+
+
+def test_pytest_evaluator_preserves_timeout_taxonomy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def timeout(*_args, **kwargs):
+        assert kwargs["timeout"] == 120
+        raise subprocess.TimeoutExpired(["pytest"], timeout=120)
+
+    monkeypatch.setattr("agentlab.evaluators.pytest_evaluator.run_process", timeout)
+
+    with pytest.raises(RuntimeError, match="PytestEvaluator exceeded the 120-second"):
+        PytestEvaluator().evaluate(
+            tmp_path,
+            EvalCase("pytest-timeout", str(tmp_path), "Run tests"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error_type"),
+    [
+        ({"passed": 1}, TypeError),
+        ({"passed": True, "score": float("nan")}, ValueError),
+        ({"passed": True, "score": 1.1}, ValueError),
+        ({"passed": True, "feedback": None}, TypeError),
+        ({"passed": True, "metadata": []}, TypeError),
+    ],
+)
+def test_evaluation_outcome_rejects_invalid_adapter_values(kwargs, error_type) -> None:
+    with pytest.raises(error_type):
+        EvaluationOutcome(**kwargs)
 
 
 class ScriptedJudge:

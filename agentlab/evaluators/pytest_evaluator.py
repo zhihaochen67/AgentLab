@@ -8,6 +8,9 @@ from pathlib import Path
 
 from agentlab.evaluators.base import EvaluationOutcome, Evaluator
 from agentlab.models import EvalCase
+from agentlab.subprocesses import run_process
+
+PYTEST_EVALUATOR_TIMEOUT_SECONDS = 120
 
 
 class PytestEvaluator(Evaluator):
@@ -20,19 +23,29 @@ class PytestEvaluator(Evaluator):
     ) -> EvaluationOutcome:
         """Run pytest and convert its exit status into an evaluation verdict."""
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                "-m",
-                "pytest",
-                "-q",
-            ],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = run_process(
+                [
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "pytest",
+                    "-q",
+                    ".",
+                    "-p",
+                    "no:cacheprovider",
+                ],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=PYTEST_EVALUATOR_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                "PytestEvaluator exceeded the "
+                f"{PYTEST_EVALUATOR_TIMEOUT_SECONDS}-second limit"
+            ) from error
 
         stdout = result.stdout or ""
         stderr = result.stderr or ""

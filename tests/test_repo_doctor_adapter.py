@@ -132,7 +132,16 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 self.stdout = stdout
                 self.stderr = stderr
 
-        def fake_run(command, *, cwd, capture_output, text, check=False, env=None):
+        def fake_run(
+            command,
+            *,
+            cwd,
+            capture_output,
+            text,
+            check=False,
+            env=None,
+            timeout=None,
+        ):
             calls.append((tuple(command), Path(cwd), check))
             if tuple(command)[:2] == ("git", "diff"):
                 return Result(stdout="--- a/module.py\n+++ b/module.py\n")
@@ -145,6 +154,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
             return Result()
 
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
 
         try:
             adapter = (
@@ -237,6 +247,7 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(
             return Result()
 
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
 
         try:
             with pytest.raises(AgentExecutionError) as captured:
@@ -332,6 +343,7 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
             )()
 
         monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
 
         try:
             with pytest.raises(AgentExecutionError) as captured:

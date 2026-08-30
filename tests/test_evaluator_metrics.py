@@ -98,7 +98,7 @@ def make_result(
     events.append(
         TraceEvent(
             run_id,
-            99,
+            len(events) + 1,
             "run_end",
             _FINISHED_AT,
             {"passed": passed, "elapsed_time": 1.25},

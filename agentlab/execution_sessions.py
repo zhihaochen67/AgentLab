@@ -7,9 +7,11 @@ import math
 import os
 import re
 import secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -18,20 +20,23 @@ from agentlab.models import EvalCase
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
 STATE_ROOT_ENV = "AGENTLAB_STATE_ROOT"
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 3
 MAX_EXECUTION_SESSION_BYTES = 1_000_000
 MAX_CASE_EXPECTED_ITEMS = 200
 MAX_TRACE_EVENTS = 2_000
 _EXECUTION_ID = re.compile(r"[0-9a-f]{32}")
 _IDENTITY = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
-class ExecutionStatus(StrEnum):
+class ExecutionStatus(str, Enum):
     """AgentLab-owned execution progress, separate from final PASS/FAIL runs."""
 
     RUNNING = "RUNNING"
     WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     RESUMING = "RESUMING"
+    VERIFYING = "VERIFYING"
+    FINALIZING = "FINALIZING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -44,6 +49,15 @@ TERMINAL_EXECUTION_STATUSES = {
 
 class ExecutionSessionError(RuntimeError):
     """A persisted execution session is missing, malformed, or unsafe."""
+
+
+@dataclass(frozen=True)
+class ExecutionFinalResult:
+    """Minimal terminal result snapshot needed for crash-safe finalization."""
+
+    passed: bool
+    tests_after_passed: bool
+    error: str | None
 
 
 @dataclass(frozen=True)
@@ -66,6 +80,8 @@ class ExecutionSession:
     dataset: str | None = None
     evaluator: str | None = None
     database_path: str | None = None
+    baseline_digest: str | None = None
+    final_result: ExecutionFinalResult | None = None
     schema_version: int = SESSION_SCHEMA_VERSION
 
 
@@ -97,7 +113,7 @@ def new_execution_id() -> str:
 
 
 def now_timestamp() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def save_execution_session(
@@ -192,6 +208,94 @@ def load_execution_session(
     return session
 
 
+def list_execution_sessions(
+    *,
+    root: Path | None = None,
+    limit: int = 20,
+) -> tuple[ExecutionSession, ...]:
+    """Load recent sessions in deterministic reverse-update order."""
+    if limit < 1:
+        return ()
+    state = _state_root(root)
+    if not (state / "executions").exists():
+        return ()
+    directory = _sessions_directory(root, create=False)
+    sessions: list[ExecutionSession] = []
+    for path in directory.glob("*.json"):
+        if path.is_symlink() or _EXECUTION_ID.fullmatch(path.stem) is None:
+            continue
+        sessions.append(load_execution_session(path.stem, root=root))
+    sessions.sort(
+        key=lambda session: (session.updated_at, session.execution_id),
+        reverse=True,
+    )
+    return tuple(sessions[:limit])
+
+
+@contextmanager
+def execution_session_lock(
+    execution_id: str,
+    *,
+    root: Path | None = None,
+) -> Iterator[None]:
+    """Hold a process-scoped, crash-releasing lock for one resume attempt."""
+    identifier = _execution_id(execution_id)
+    directory = _sessions_directory(root, create=False)
+    path = directory / f".{identifier}.lock"
+    if path.is_symlink():
+        raise ExecutionSessionError("Execution-session lock cannot be a symlink.")
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise ExecutionSessionError(
+            f"Could not open execution-session lock: {error}"
+        ) from error
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise ExecutionSessionError(
+                    f"Execution session {identifier} is already being resumed."
+                ) from error
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise ExecutionSessionError(
+                    f"Execution session {identifier} is already being resumed."
+                ) from error
+        locked = True
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def load_active_execution_session(
     execution_id: str,
     *,
@@ -202,7 +306,12 @@ def load_active_execution_session(
         raise ExecutionSessionError(
             f"Execution session {session.execution_id} is terminal and cannot be replayed."
         )
-    if session.status is not ExecutionStatus.WAITING_FOR_APPROVAL:
+    if session.status not in {
+        ExecutionStatus.WAITING_FOR_APPROVAL,
+        ExecutionStatus.RESUMING,
+        ExecutionStatus.VERIFYING,
+        ExecutionStatus.FINALIZING,
+    }:
         raise ExecutionSessionError(
             f"Execution session {session.execution_id} is {session.status.value}, not resumable."
         )
@@ -259,7 +368,7 @@ def _fsync_directory(directory: Path) -> None:
 
 def _session_to_data(session: ExecutionSession) -> dict[str, Any]:
     return {
-        "schema_version": session.schema_version,
+        "schema_version": SESSION_SCHEMA_VERSION,
         "execution_id": session.execution_id,
         "run_id": session.run_id,
         "case": {
@@ -295,11 +404,21 @@ def _session_to_data(session: ExecutionSession) -> dict[str, Any]:
         "dataset": session.dataset,
         "evaluator": session.evaluator,
         "database_path": session.database_path,
+        "baseline_digest": session.baseline_digest,
+        "final_result": (
+            {
+                "passed": session.final_result.passed,
+                "tests_after_passed": session.final_result.tests_after_passed,
+                "error": session.final_result.error,
+            }
+            if session.final_result is not None
+            else None
+        ),
     }
 
 
 def _session_from_data(value: object) -> ExecutionSession:
-    keys = {
+    base_keys = {
         "schema_version",
         "execution_id",
         "run_id",
@@ -318,13 +437,19 @@ def _session_from_data(value: object) -> ExecutionSession:
         "evaluator",
         "database_path",
     }
-    data = _object(value, "execution session", keys)
-    version = _integer(data["schema_version"], "schema_version")
-    if version != SESSION_SCHEMA_VERSION:
+    unvalidated = _object(value, "execution session")
+    version = _integer(unvalidated.get("schema_version"), "schema_version")
+    if version not in {1, 2, SESSION_SCHEMA_VERSION}:
         raise ExecutionSessionError(
             f"Unsupported execution-session schema version {version}; "
-            f"expected {SESSION_SCHEMA_VERSION}."
+            f"expected 1, 2, or {SESSION_SCHEMA_VERSION}."
         )
+    keys = base_keys
+    if version >= 2:
+        keys |= {"baseline_digest"}
+    if version >= 3:
+        keys |= {"final_result"}
+    data = _object(value, "execution session", keys)
     execution_id = _execution_id(data["execution_id"])
     run_id = _identity(data["run_id"], "run_id")
     case_data = _object(data["case"], "case", {"id", "repository", "task", "expected"})
@@ -388,6 +513,53 @@ def _session_from_data(value: object) -> ExecutionSession:
     database_path = _optional_text(data["database_path"], "database_path", 8_000)
     if database_path is not None and not Path(database_path).is_absolute():
         raise ExecutionSessionError("database_path must be absolute when present.")
+    baseline_digest = None
+    if version >= 2:
+        baseline_digest = _optional_text(
+            data["baseline_digest"], "baseline_digest", 64
+        )
+        if baseline_digest is not None and _DIGEST.fullmatch(baseline_digest) is None:
+            raise ExecutionSessionError("baseline_digest is invalid.")
+    final_result = None
+    if version >= 3 and data["final_result"] is not None:
+        result_data = _object(
+            data["final_result"],
+            "final_result",
+            {"passed", "tests_after_passed", "error"},
+        )
+        final_result = ExecutionFinalResult(
+            passed=_boolean(result_data["passed"], "final_result.passed"),
+            tests_after_passed=_boolean(
+                result_data["tests_after_passed"],
+                "final_result.tests_after_passed",
+            ),
+            error=_optional_text(result_data["error"], "final_result.error", 8_000),
+        )
+    if status is ExecutionStatus.FINALIZING and final_result is None:
+        raise ExecutionSessionError("FINALIZING execution requires a final result.")
+    if status in {
+        ExecutionStatus.WAITING_FOR_APPROVAL,
+        ExecutionStatus.RESUMING,
+        ExecutionStatus.VERIFYING,
+    } and final_result is not None:
+        raise ExecutionSessionError(
+            f"{status.value} execution cannot contain a final result."
+        )
+    if final_result is not None:
+        if not trace or trace[-1].event_type != "run_end":
+            raise ExecutionSessionError(
+                "Execution final result requires a terminal run_end trace event."
+            )
+        end_passed = trace[-1].data.get("passed")
+        tests_after_passed = trace[-1].data.get("tests_after_passed")
+        if end_passed is not final_result.passed:
+            raise ExecutionSessionError(
+                "final_result.passed does not match the run_end trace."
+            )
+        if tests_after_passed is not final_result.tests_after_passed:
+            raise ExecutionSessionError(
+                "final_result.tests_after_passed does not match the run_end trace."
+            )
     return ExecutionSession(
         execution_id=execution_id,
         run_id=run_id,
@@ -407,7 +579,9 @@ def _session_from_data(value: object) -> ExecutionSession:
         dataset=_optional_text(data["dataset"], "dataset", 8_000),
         evaluator=_optional_text(data["evaluator"], "evaluator", 128),
         database_path=database_path,
-        schema_version=version,
+        baseline_digest=baseline_digest,
+        final_result=final_result,
+        schema_version=SESSION_SCHEMA_VERSION,
     )
 
 

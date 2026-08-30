@@ -131,6 +131,12 @@ def event_status(event: TraceEvent) -> str:
         if data.get("status") == "error":
             return "ERROR"
         return "PASS" if data.get("passed") else "FAIL"
+    if event_type == "workspace_verification_end":
+        if data.get("status") == "error":
+            return "ERROR"
+        return "PASS" if data.get("passed") else "FAIL"
+    if event_type in {"agent_suspended", "run_suspended"}:
+        return "WAITING"
     if event_type == "agent_end":
         return "OK" if data.get("status") == "ok" else "ERROR"
     if event_type == "run_end":
@@ -158,6 +164,13 @@ def format_replay_event(event: TraceEvent) -> ReplayEventView:
     keys: tuple[str, ...]
     if event_type.startswith("pytest_") and event_type.endswith("_end"):
         keys = ("passed", "returncode", "stdout", "stderr")
+    elif event_type == "workspace_verification_end":
+        keys = (
+            "passed",
+            "modified_files",
+            "missing_expected_files",
+            "unexpected_files",
+        )
     elif event_type == "agent_end":
         keys = ("adapter", "status", "returncode", "stdout", "stderr")
     elif event_type == "error":
@@ -165,9 +178,11 @@ def format_replay_event(event: TraceEvent) -> ReplayEventView:
     elif event_type == "run_end":
         keys = (
             "final_status",
+            "failure_reason",
             "passed",
             "tests_before_passed",
             "tests_after_passed",
+            "workspace_changes_passed",
             "elapsed_time",
         )
     else:

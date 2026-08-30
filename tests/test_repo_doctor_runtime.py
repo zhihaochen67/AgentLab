@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agentlab.adapters import AgentExecutionError, AgentSuspended
+from agentlab.adapters import AgentExecutionError, AgentResumeHandle, AgentSuspended
 from agentlab.adapters.repo_doctor import (
     REPO_DOCTOR_PROJECT_ENV,
     REPO_DOCTOR_STATE_ENV,
@@ -101,7 +101,16 @@ def test_structured_suspension_and_resume_use_only_repo_doctor_session(
     workspace = _workspace(tmp_path)
     calls: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
 
-    def fake_run(command, *, cwd, env, capture_output, text, check=False):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        capture_output,
+        text,
+        check=False,
+        timeout=None,
+    ):
         calls.append((tuple(command), Path(cwd), env))
         if "fix" in command:
             _write_state(env, _session_data(workspace, "patch_pending"))
@@ -114,7 +123,7 @@ def test_structured_suspension_and_resume_use_only_repo_doctor_session(
         path.write_text(json.dumps(data), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "request secret-id consumed", "")
 
-    monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+    monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
     adapter = RepoDoctorAdapter()
     try:
         with pytest.raises(AgentSuspended) as captured:
@@ -143,6 +152,61 @@ def test_structured_suspension_and_resume_use_only_repo_doctor_session(
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_resume_reconciles_already_terminal_repo_doctor_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    state_root = (tmp_path / "state" / "repo-doctor").resolve()
+    _write_state(
+        {REPO_DOCTOR_STATE_ENV: str(state_root)},
+        _session_data(workspace, "verified_pass"),
+    )
+    (workspace / "requirements.txt").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "agentlab.adapters.repo_doctor.run_process",
+        lambda *_args, **_kwargs: pytest.fail("terminal reconciliation must not relaunch"),
+    )
+
+    result = RepoDoctorAdapter().resume(
+        workspace,
+        AgentResumeHandle(
+            "repo_doctor",
+            SESSION_ID,
+            "approval_required",
+            {"scaffold": "requirements.txt"},
+        ),
+    )
+
+    assert result.returncode == 0
+    assert result.diagnostics is not None
+    assert result.diagnostics.final_status == "verified_pass"
+    assert not (workspace / "requirements.txt").exists()
+
+
+def test_repo_doctor_process_timeout_is_enforced(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def timeout(*_args, **kwargs):
+        assert kwargs["timeout"] == 7
+        raise subprocess.TimeoutExpired(["repo-doctor"], timeout=7)
+
+    monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", timeout)
+
+    with pytest.raises(AgentExecutionError, match="timed out") as captured:
+        RepoDoctorAdapter(process_timeout=7)._run_process(
+            ["repo-doctor"],
+            cwd=tmp_path,
+            environment={},
+            report_path=None,
+        )
+
+    assert captured.value.diagnostics is not None
+    assert captured.value.diagnostics.failure_type.value == "timeout"
+
+
 @pytest.mark.parametrize(
     "phase",
     ["patch_rejected", "verification_failed", "error"],
@@ -159,7 +223,7 @@ def test_structured_terminal_failure_is_not_suspension(
         _write_state(env, _session_data(workspace, phase))
         return subprocess.CompletedProcess(command, 0, "approval", "")
 
-    monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+    monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
     try:
         with pytest.raises(AgentExecutionError, match=phase):
             RepoDoctorAdapter().repair(workspace, "fix it")
@@ -180,7 +244,7 @@ def test_malformed_lifecycle_fails_closed_and_stdout_never_suspends(
         _write_state(env, data)
         return subprocess.CompletedProcess(command, 0, "WAITING FOR APPROVAL", "")
 
-    monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", malformed)
+    monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", malformed)
     with pytest.raises(ValueError, match="unexpected schema"):
         RepoDoctorAdapter().repair(workspace, "fix it")
     shutil.rmtree(workspace, ignore_errors=True)
@@ -192,7 +256,7 @@ def test_malformed_lifecycle_fails_closed_and_stdout_never_suspends(
     def prose_only(command, **_kwargs):
         return subprocess.CompletedProcess(command, 0, "WAITING FOR APPROVAL", "")
 
-    monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", prose_only)
+    monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", prose_only)
     try:
         result = RepoDoctorAdapter().repair(workspace, "fix it")
         assert result.returncode == 0

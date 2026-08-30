@@ -102,7 +102,7 @@ def make_result(
     events.append(
         TraceEvent(
             run_id,
-            99,
+            len(events) + 1,
             "run_end",
             _FINISHED_AT,
             {"passed": passed, "elapsed_time": 1.25},
@@ -538,7 +538,7 @@ def test_invalid_metadata_type_rejected() -> None:
         assert storage.get_run("bad-metadata-run") is None
 
 
-@pytest.mark.parametrize("elapsed_time", [-0.5, "fast"])
+@pytest.mark.parametrize("elapsed_time", [-0.5, float("nan"), "fast"])
 def test_invalid_elapsed_time_rejected(elapsed_time) -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-eval-storage-") as directory:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")

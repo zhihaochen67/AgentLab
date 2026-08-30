@@ -12,6 +12,11 @@ from typing import Any
 import yaml
 
 from agentlab.models import EvalCase
+from agentlab.runner import (
+    UnsupportedWorkspaceSymlinkError,
+    validate_workspace_symlinks,
+)
+from agentlab.subprocesses import run_process
 from agentlab.tracer import summarize_text
 
 FIXTURE_PYTEST_TIMEOUT = 30
@@ -155,7 +160,13 @@ def _validate_repository(
     if not isinstance(case.repository, str) or not case.repository.strip():
         issues.append(f"{label}: repository must be a non-empty path.")
         return None
-    repository = Path(case.repository).resolve()
+    try:
+        repository = validate_workspace_symlinks(case.repository)
+    except UnsupportedWorkspaceSymlinkError as error:
+        issues.append(f"{label}: {error}")
+        return None
+    except OSError:
+        repository = Path(case.repository).resolve()
     if not repository.is_dir():
         issues.append(f"{label}: repository does not exist: {case.repository}.")
         return None
@@ -199,7 +210,7 @@ def _validate_expected(
 def run_fixture_pytest(repository: Path) -> FixturePytestResult:
     """Run a fixture's tests without cache or bytecode side effects."""
     try:
-        completed = subprocess.run(
+        completed = run_process(
             [
                 sys.executable,
                 "-B",

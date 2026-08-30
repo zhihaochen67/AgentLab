@@ -6,15 +6,17 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from agentlab.adapters import create_default_registry
+from agentlab.adapters import AgentPreflightError, create_default_registry
 from agentlab.adapters.repo_doctor import DEFAULT_PROMPT_VARIANT
 from agentlab.comparison import ExperimentComparisonError, compare_experiments
-from agentlab.dataset import load_dataset
+from agentlab.dataset import DatasetValidationError, load_dataset
 from agentlab.diagnostics import diagnostics_from_trace_data
 from agentlab.evaluators import JudgeConfigurationError, create_evaluator
 from agentlab.execution_sessions import (
     ExecutionSessionError,
-    load_active_execution_session,
+    ExecutionStatus,
+    list_execution_sessions,
+    load_execution_session,
 )
 from agentlab.experiments import (
     ExperimentAbortedError,
@@ -89,21 +91,30 @@ def run_eval(
     evaluator: str = typer.Option(
         "none",
         "--evaluator",
-        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+        help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
 ):
     """Run an AgentLab evaluation dataset."""
 
     try:
         selected_evaluator = create_evaluator(evaluator)
-    except (JudgeConfigurationError, ValueError) as error:
-        console.print(f"[red]{error}[/red]")
+        registry = create_default_registry()
+        selected_adapter = registry.create(agent)
+        selected_adapter.preflight()
+        cases = load_dataset(dataset)
+        storage = _open_storage()
+    except (
+        AgentPreflightError,
+        DatasetValidationError,
+        ExecutionSessionError,
+        JudgeConfigurationError,
+        KeyError,
+        StorageError,
+        TypeError,
+        ValueError,
+    ) as error:
+        console.print(f"[red]Could not start evaluation: {_error_message(error)}[/red]")
         raise typer.Exit(1) from error
-
-    cases = load_dataset(dataset)
-    storage = _open_storage()
-    registry = create_default_registry()
-    selected_adapter = registry.create(agent)
 
     console.print()
     console.print("[bold cyan]AgentLab Evaluation[/bold cyan]")
@@ -183,11 +194,19 @@ def run_eval(
 def resume_execution(execution_id: str):
     """Resume one persisted single-case evaluation execution."""
     try:
-        session = load_active_execution_session(execution_id)
-        selected_adapter = create_default_registry().create(session.adapter)
+        session = load_execution_session(execution_id)
+        selected_adapter = (
+            None
+            if session.status in {
+                ExecutionStatus.VERIFYING,
+                ExecutionStatus.FINALIZING,
+            }
+            else create_default_registry().create(session.adapter)
+        )
         selected_evaluator = (
             create_evaluator(session.evaluator)
             if session.evaluator is not None
+            and session.status is not ExecutionStatus.FINALIZING
             else None
         )
         result = resume_evaluation(
@@ -203,26 +222,16 @@ def resume_execution(execution_id: str):
         TypeError,
         ValueError,
     ) as error:
-        console.print(f"[red]Could not resume execution {execution_id}: {error}[/red]")
+        console.print(
+            f"[red]Could not resume execution {execution_id}: "
+            f"{_error_message(error)}[/red]"
+        )
         raise typer.Exit(1) from error
 
     if isinstance(result, EvaluationSuspended):
         _render_suspended(result)
         raise typer.Exit(SUSPENDED_EXIT_CODE)
 
-    database = (
-        Path(session.database_path)
-        if session.database_path
-        else default_database_path()
-    )
-    dataset = session.dataset or "resumed-single-evaluation"
-    try:
-        SQLiteStorage(database).save_run(result, dataset)
-    except (StorageError, TypeError, ValueError) as error:
-        console.print(
-            f"[red]Evaluation completed but could not be persisted: {error}[/red]"
-        )
-        raise typer.Exit(1) from error
     status = "PASS" if result.passed else "FAIL"
     markup = "green" if result.passed else "red"
     console.print(f"[{markup}]{status}[/{markup}] {result.case_id}")
@@ -238,15 +247,78 @@ def _render_suspended(result: EvaluationSuspended) -> None:
     console.print(f"Resume with: agentlab resume {result.execution_id}")
 
 
+@app.command("executions")
+def show_recent_executions():
+    """Show recent resumable execution sessions, including terminal history."""
+    try:
+        sessions = list_execution_sessions(limit=20)
+    except ExecutionSessionError as error:
+        console.print(f"[red]Could not list executions: {_error_message(error)}[/red]")
+        raise typer.Exit(1) from error
+    if not sessions:
+        console.print("No execution sessions yet.")
+        return
+    table = Table(box=None, pad_edge=False)
+    table.add_column("Execution ID", no_wrap=True)
+    table.add_column("Case")
+    table.add_column("Status", no_wrap=True)
+    for session in sessions:
+        table.add_row(
+            session.execution_id,
+            session.case.id,
+            session.status.value,
+        )
+    console.print(table)
+
+
+@app.command("execution-show")
+def show_execution(execution_id: str):
+    """Show one persisted resumable execution without replaying it."""
+    try:
+        session = load_execution_session(execution_id)
+    except ExecutionSessionError as error:
+        console.print(
+            f"[red]Could not load execution {execution_id}: "
+            f"{_error_message(error)}[/red]"
+        )
+        raise typer.Exit(1) from error
+    console.print(f"Execution ID: {session.execution_id}")
+    console.print(f"Run ID: {session.run_id}")
+    console.print(f"Case: {session.case.id}")
+    console.print(f"Adapter: {session.adapter}")
+    console.print(f"Status: {session.status.value}")
+    console.print(f"Resume reason: {session.resume_handle.reason}")
+    console.print(f"Dataset: {session.dataset or 'not recorded'}")
+    console.print(f"Created: {session.created_at}")
+    console.print(f"Updated: {session.updated_at}")
+    console.print(f"Trace events: {len(session.trace)}")
+    if session.trace:
+        status = {
+            "COMPLETED": "PASS",
+            "FAILED": "FAIL",
+        }.get(session.status.value, session.status.value)
+        _render_trace(
+            run_id=session.run_id,
+            case_id=session.case.id,
+            status=status,
+            events=session.trace,
+            total_latency=session.elapsed_seconds,
+        )
+
+
 @app.command("trace")
 def show_stored_trace(run_id: str):
     """Show a completed run loaded from SQLite."""
-    storage = _open_storage()
-    run = storage.get_run(run_id)
+    try:
+        storage = _open_storage()
+        run = storage.get_run(run_id)
+        events = storage.get_trace_events(run_id) if run is not None else ()
+    except StorageError as error:
+        console.print(f"[red]Could not load run: {_error_message(error)}[/red]")
+        raise typer.Exit(1) from error
     if run is None:
         console.print(f"[red]Run not found: {run_id}[/red]")
         raise typer.Exit(1)
-    events = storage.get_trace_events(run_id)
     _render_trace(
         run_id=run.run_id,
         case_id=run.case_id,
@@ -259,8 +331,11 @@ def show_stored_trace(run_id: str):
 @app.command("runs")
 def show_recent_runs():
     """Show the 20 most recently completed runs from SQLite."""
-    storage = _open_storage()
-    runs = storage.list_runs(limit=20)
+    try:
+        runs = _open_storage().list_runs(limit=20)
+    except StorageError as error:
+        console.print(f"[red]Could not list runs: {_error_message(error)}[/red]")
+        raise typer.Exit(1) from error
 
     table = Table(box=None, pad_edge=False)
     table.add_column("Run ID", no_wrap=True)
@@ -326,7 +401,7 @@ def run_experiment_command(
     evaluator: str = typer.Option(
         "none",
         "--evaluator",
-        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+        help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
 ):
     """Run a persisted repeated-trial evaluation experiment."""
@@ -336,19 +411,20 @@ def run_experiment_command(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
-    cases = load_dataset(dataset, validate_initial_state=False)
-    storage = _open_storage()
     effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
     try:
+        cases = load_dataset(dataset, validate_initial_state=False)
+        storage = _open_storage()
+        selected_adapter = create_default_registry().create(
+            agent,
+            prompt_variant=effective_prompt_variant,
+            agent_version=agent_version,
+        )
         execution = run_experiment(
             cases=cases,
             dataset=dataset,
             storage=storage,
-            adapter=create_default_registry().create(
-                agent,
-                prompt_variant=effective_prompt_variant,
-                agent_version=agent_version,
-            ),
+            adapter=selected_adapter,
             trials_per_case=trials,
             label=label,
             agent_version=agent_version,
@@ -363,8 +439,17 @@ def run_experiment_command(
         console.print("Status: [red]ABORTED[/red]")
         console.print("Runs executed: 0")
         raise typer.Exit(1) from error
-    except (ExperimentAbortedError, StorageError, ValueError) as error:
-        console.print(f"[red]Experiment aborted: {error}[/red]")
+    except (
+        DatasetValidationError,
+        ExperimentAbortedError,
+        KeyError,
+        StorageError,
+        TypeError,
+        ValueError,
+    ) as error:
+        console.print(
+            f"[red]Experiment aborted: {_error_message(error)}[/red]"
+        )
         if isinstance(error, ExperimentAbortedError):
             console.print(f"Experiment: {error.experiment_id}")
         raise typer.Exit(1) from error
@@ -403,7 +488,7 @@ def run_benchmark(
     evaluator: str = typer.Option(
         "none",
         "--evaluator",
-        help="Post-test evaluator to apply after pytest passes: 'none' or 'llm_judge'.",
+        help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
 ):
     """Run a benchmark evaluation for one agent."""
@@ -414,20 +499,21 @@ def run_benchmark(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
-    cases = load_dataset(dataset, validate_initial_state=False)
-    storage = _open_storage()
     effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
 
     try:
+        cases = load_dataset(dataset, validate_initial_state=False)
+        storage = _open_storage()
+        selected_adapter = create_default_registry().create(
+            agent,
+            agent_version=agent_version,
+            prompt_variant=effective_prompt_variant,
+        )
         execution: ExperimentExecution = run_experiment(
             cases=cases,
             dataset=dataset,
             storage=storage,
-            adapter=create_default_registry().create(
-                agent,
-                agent_version=agent_version,
-                prompt_variant=effective_prompt_variant,
-            ),
+            adapter=selected_adapter,
             trials_per_case=trials,
             label=label or f"{agent}-benchmark",
             agent_version=agent_version,
@@ -437,8 +523,15 @@ def run_benchmark(
     except ExperimentPreflightError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
-    except (ExperimentAbortedError, StorageError, ValueError) as error:
-        console.print(f"[red]Benchmark failed: {error}[/red]")
+    except (
+        DatasetValidationError,
+        ExperimentAbortedError,
+        KeyError,
+        StorageError,
+        TypeError,
+        ValueError,
+    ) as error:
+        console.print(f"[red]Benchmark failed: {_error_message(error)}[/red]")
         raise typer.Exit(1) from error
 
     console.print("[bold cyan]Agent Benchmark[/bold cyan]")
@@ -454,8 +547,13 @@ def run_benchmark(
 @app.command("experiments")
 def show_recent_experiments():
     """Show the 20 most recent persisted experiments."""
-    storage = _open_storage()
-    experiments = storage.list_experiments(limit=20)
+    try:
+        experiments = _open_storage().list_experiments(limit=20)
+    except StorageError as error:
+        console.print(
+            f"[red]Could not list experiments: {_error_message(error)}[/red]"
+        )
+        raise typer.Exit(1) from error
     if not experiments:
         console.print("No experiments yet.")
         return
@@ -483,12 +581,21 @@ def show_recent_experiments():
 @app.command("experiment-show")
 def show_experiment(experiment_id: str):
     """Show metadata and aggregate metrics for one persisted experiment."""
-    storage = _open_storage()
-    experiment = storage.get_experiment(experiment_id)
+    try:
+        storage = _open_storage()
+        experiment = storage.get_experiment(experiment_id)
+        metrics = (
+            storage.get_experiment_metrics(experiment_id)
+            if experiment is not None
+            else None
+        )
+    except StorageError as error:
+        console.print(f"[red]Could not load experiment: {_error_message(error)}[/red]")
+        raise typer.Exit(1) from error
     if experiment is None:
         console.print(f"[red]Experiment not found: {experiment_id}[/red]")
         raise typer.Exit(1)
-    metrics = storage.get_experiment_metrics(experiment_id)
+    assert metrics is not None
     _render_experiment(experiment, metrics)
 
 
@@ -504,14 +611,21 @@ def generate_report(
     """Generate a JSON report for one experiment."""
     import json
 
-    storage = _open_storage(read_only=True)
-
-    experiment = storage.get_experiment(experiment_id)
+    try:
+        storage = _open_storage(read_only=True)
+        experiment = storage.get_experiment(experiment_id)
+        metrics = (
+            storage.get_experiment_metrics(experiment_id)
+            if experiment is not None
+            else None
+        )
+    except StorageError as error:
+        console.print(f"[red]Could not build report: {_error_message(error)}[/red]")
+        raise typer.Exit(1) from error
     if experiment is None:
         console.print(f"[red]Experiment not found: {experiment_id}[/red]")
         raise typer.Exit(1)
-
-    metrics = storage.get_experiment_metrics(experiment_id)
+    assert metrics is not None
 
     report = build_experiment_report(
         experiment,
@@ -526,14 +640,18 @@ def generate_report(
 
     if output:
         output_path = Path(output)
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        output_path.write_text(
-            report_json,
-            encoding="utf-8",
-        )
+        try:
+            output_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            output_path.write_text(
+                report_json,
+                encoding="utf-8",
+            )
+        except OSError as error:
+            console.print(f"[red]Could not write report: {_error_message(error)}[/red]")
+            raise typer.Exit(1) from error
         console.print(f"Report written to {output_path}")
     else:
         console.print_json(report_json)
@@ -545,8 +663,8 @@ def compare_experiment_command(
     candidate_experiment_id: str,
 ):
     """Compare two persisted experiments without running new evaluations."""
-    storage = _open_storage(read_only=True)
     try:
+        storage = _open_storage(read_only=True)
         comparison = compare_experiments(
             storage,
             baseline_experiment_id,
@@ -776,6 +894,12 @@ def _experiment_status_markup(status: str) -> str:
     return "[cyan]RUNNING[/cyan]"
 
 
+def _error_message(error: Exception) -> str:
+    if isinstance(error, KeyError) and error.args:
+        return str(error.args[0])
+    return str(error)
+
+
 def _open_storage(*, read_only: bool = False) -> SQLiteStorage:
     try:
         return SQLiteStorage(default_database_path(), read_only=read_only)
@@ -802,7 +926,12 @@ def _render_trace(
     console.print()
     console.print(f"[bold cyan]Run:[/bold cyan] {run_id}")
     console.print(f"[bold]Case:[/bold] {case_id}")
-    status_markup = "[green]PASS[/green]" if status == "PASS" else "[red]FAIL[/red]"
+    if status == "PASS":
+        status_markup = "[green]PASS[/green]"
+    elif status == "FAIL":
+        status_markup = "[red]FAIL[/red]"
+    else:
+        status_markup = f"[yellow]{status}[/yellow]"
     console.print(f"[bold]Status:[/bold] {status_markup}")
     console.print()
 
@@ -815,7 +944,10 @@ def _render_trace(
 
     for event in events:
         status = ""
-        if event.event_type.startswith("pytest_") and event.event_type.endswith("_end"):
+        if (
+            event.event_type.startswith("pytest_")
+            and event.event_type.endswith("_end")
+        ) or event.event_type == "workspace_verification_end":
             if event.data.get("status") == "error":
                 status = "[red]ERROR[/red]"
             else:
@@ -824,6 +956,8 @@ def _render_trace(
                     if event.data.get("passed")
                     else "[red]FAIL[/red]"
                 )
+        elif event.event_type in {"agent_suspended", "run_suspended"}:
+            status = "[yellow]WAITING[/yellow]"
         elif event.event_type == "agent_end":
             status = (
                 "[green]OK[/green]"
@@ -845,14 +979,45 @@ def _render_trace(
             detail = str(diagnostics["failure_type"]).upper()
             if diagnostics.get("failure_phase"):
                 detail += f" / {diagnostics['failure_phase']}"
+        elif event.event_type == "run_end" and event.data.get("failure_reason"):
+            detail = str(event.data["failure_reason"]).upper()
         table.add_row(
             str(event.sequence), event.event_type, status, elapsed_text, detail
         )
 
     console.print(table)
+    _render_workspace_verification(events)
     _render_failure_diagnostics(events)
     console.print()
     console.print(f"Total latency: {total_latency:.2f}s")
+
+
+def _render_workspace_verification(events: Sequence[TraceEvent]) -> None:
+    event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.event_type == "workspace_verification_end"
+            and event.data.get("passed") is False
+        ),
+        None,
+    )
+    if event is None:
+        return
+    console.print()
+    console.print("[bold]Workspace Change Contract[/bold]")
+    for label, key in (
+        ("Modified", "modified_files"),
+        ("Expected but unchanged", "missing_expected_files"),
+        ("Unexpected", "unexpected_files"),
+    ):
+        values = event.data.get(key)
+        rendered = (
+            ", ".join(str(value) for value in values)
+            if isinstance(values, list) and values
+            else "none"
+        )
+        console.print(f"[bold]{label}:[/bold] {rendered}")
 
 
 def _render_failure_diagnostics(events: Sequence[TraceEvent]) -> None:

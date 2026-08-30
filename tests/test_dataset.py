@@ -1,3 +1,5 @@
+import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -87,6 +89,28 @@ def test_missing_repository_is_rejected() -> None:
             validate_dataset([make_case(missing)], validate_initial_state=False)
 
 
+def test_dataset_rejects_directory_symlink_before_fixture_pytest(
+    tmp_path: Path,
+) -> None:
+    repository = make_repository(tmp_path)
+    real_directory = repository / "real-tests"
+    real_directory.mkdir()
+    link = repository / "linked-tests"
+    _symlink_or_skip(link, real_directory, target_is_directory=True)
+
+    def unexpected_pytest(_repository: Path) -> FixturePytestResult:
+        pytest.fail("fixture pytest must not run before symlink validation")
+
+    with pytest.raises(
+        DatasetValidationError,
+        match="directory symlinks are unsupported.*linked-tests",
+    ):
+        validate_dataset(
+            [make_case(repository)],
+            pytest_runner=unexpected_pytest,
+        )
+
+
 def test_empty_task_is_rejected() -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-dataset-") as directory:
         repository = make_repository(Path(directory))
@@ -147,6 +171,20 @@ def test_dataset_validation_does_not_modify_fixtures() -> None:
     assert after == before
 
 
+def test_fixture_pytest_timeout_remains_a_dataset_validation_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def timeout(*_args, **kwargs):
+        assert kwargs["timeout"] == 30
+        raise subprocess.TimeoutExpired(["pytest"], timeout=30)
+
+    monkeypatch.setattr("agentlab.dataset.run_process", timeout)
+
+    with pytest.raises(DatasetValidationError, match="Could not run fixture pytest"):
+        run_fixture_pytest(tmp_path)
+
+
 class SequentialFixingAdapter(AgentAdapter):
     def __init__(self) -> None:
         self.tasks: list[str] = []
@@ -160,6 +198,20 @@ class SequentialFixingAdapter(AgentAdapter):
             encoding="utf-8",
         )
         return AgentRunResult(0, "fixed", "")
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as error:
+        if os.name == "nt":
+            pytest.skip(f"Windows symlink privilege is unavailable: {error}")
+        raise
 
 
 def test_multi_case_dataset_loads_and_executes_in_order() -> None:

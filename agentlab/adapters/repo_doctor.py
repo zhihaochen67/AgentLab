@@ -29,6 +29,7 @@ from agentlab.diagnostics import (
 )
 from agentlab.execution_sessions import repo_doctor_state_root
 from agentlab.providers import is_plausible_api_key
+from agentlab.subprocesses import run_process
 from agentlab.tracer import summarize_text
 
 WORKSPACE_MARKER = ".agentlab-workspace"
@@ -105,6 +106,7 @@ class RepoDoctorAdapter(AgentAdapter):
     """Run Repo Doctor from one verified checkout and resume its own sessions."""
 
     verification_timeout: int = 120
+    process_timeout: int = 300
     prompt_variant: str = DEFAULT_PROMPT_VARIANT
     agent_version: str | None = None
 
@@ -127,6 +129,8 @@ class RepoDoctorAdapter(AgentAdapter):
             raise ValueError("Repo Doctor prompt_variant must be non-empty.")
         if self.verification_timeout < 1:
             raise ValueError("Repo Doctor verification_timeout must be positive.")
+        if self.process_timeout < 1:
+            raise ValueError("Repo Doctor process_timeout must be positive.")
 
     def preflight(self) -> AgentPreflightResult:
         """Require provider settings and verified Repo Doctor provenance."""
@@ -262,13 +266,17 @@ class RepoDoctorAdapter(AgentAdapter):
                 "AgentLab state root must remain outside the evaluation workspace."
             )
         state = self._read_repair_state(state_root, handle.session_id, workspace)
-        if state.phase not in _SUSPENDED_PHASES:
-            raise ValueError("Repo Doctor session is not in a resumable phase.")
-        launch = self._launch_context()
-        environment = dict(launch.environment)
-        environment[REPO_DOCTOR_STATE_ENV] = str(state_root)
         suspended = False
         try:
+            if state.phase not in _SUSPENDED_PHASES:
+                return self._mcp_outcome(
+                    subprocess.CompletedProcess((), 0, "", ""),
+                    state,
+                    scaffold,
+                )
+            launch = self._launch_context()
+            environment = dict(launch.environment)
+            environment[REPO_DOCTOR_STATE_ENV] = str(state_root)
             result = self._run_process(
                 [*launch.prefix, "resume", handle.session_id],
                 cwd=launch.project,
@@ -364,13 +372,14 @@ class RepoDoctorAdapter(AgentAdapter):
         report_path: Path | None,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(
+            return run_process(
                 command,
                 cwd=cwd,
                 env=environment,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self.process_timeout,
             )
         except subprocess.TimeoutExpired as error:
             stdout = self._process_output(error.stdout)

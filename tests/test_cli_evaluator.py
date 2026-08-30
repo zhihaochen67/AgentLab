@@ -86,7 +86,9 @@ def test_eval_default_does_not_require_judge_env(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.evaluate_case", fake_evaluate)
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: storage)
 
-    result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
+    result = CliRunner().invoke(
+        app, ["eval", "dataset.yaml", "--agent", "mock_agent"]
+    )
 
     assert result.exit_code == 0
     assert calls["kwargs"]["evaluator"] is None
@@ -153,7 +155,10 @@ def test_eval_evaluator_none_preserves_old_behavior(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli.evaluate_case", fake_evaluate)
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: storage)
 
-    result = CliRunner().invoke(app, ["eval", "dataset.yaml", "--evaluator", "none"])
+    result = CliRunner().invoke(
+        app,
+        ["eval", "dataset.yaml", "--agent", "mock_agent", "--evaluator", "none"],
+    )
 
     assert result.exit_code == 0
     assert calls["kwargs"]["evaluator"] is None
@@ -178,7 +183,15 @@ def test_eval_llm_judge_is_wired(monkeypatch) -> None:
     monkeypatch.setattr("agentlab.cli._open_storage", lambda: storage)
 
     result = CliRunner().invoke(
-        app, ["eval", "dataset.yaml", "--evaluator", "llm_judge"]
+        app,
+        [
+            "eval",
+            "dataset.yaml",
+            "--agent",
+            "mock_agent",
+            "--evaluator",
+            "llm_judge",
+        ],
     )
 
     assert result.exit_code == 0

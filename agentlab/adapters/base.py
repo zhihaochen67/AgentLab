@@ -112,7 +112,7 @@ class AgentAdapter(ABC):
         """Attempt *task* by modifying only *workspace*."""
 
     def preflight(self) -> AgentPreflightResult:
-        """Validate experiment prerequisites without executing an evaluation."""
+        """Validate prerequisites without executing an evaluation."""
         return AgentPreflightResult()
 
     def resume(
@@ -120,7 +120,11 @@ class AgentAdapter(ABC):
         workspace: Path,
         handle: AgentResumeHandle,
     ) -> AgentRunResult | None:
-        """Resume an adapter-owned execution, or fail explicitly if unsupported."""
+        """Resume or reconcile adapter-owned state after a possible process crash.
+
+        Resumable adapters should make this operation idempotent: AgentLab may call
+        it again when a prior process exited after persisting ``RESUMING``.
+        """
         raise AgentResumeUnsupportedError(
             f"{type(self).__name__} does not support resumable execution."
         )

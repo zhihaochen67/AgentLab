@@ -235,6 +235,59 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
         assert metrics.failure_types == (("timeout", 1),)
 
 
+def test_failure_taxonomy_uses_run_level_gate_reason_without_agent_diagnostics() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-experiment-") as directory:
+        storage = SQLiteStorage(Path(directory) / "agentlab.db")
+        experiment = make_experiment("gate-failure")
+        storage.create_experiment(experiment)
+        run_id = "gate-failure-run"
+        trace = (
+            TraceEvent(
+                run_id,
+                1,
+                "run_start",
+                "2026-08-19T01:00:00+00:00",
+                {"case_id": "case-a", "adapter": "FakeExperimentAdapter"},
+            ),
+            TraceEvent(
+                run_id,
+                2,
+                "pytest_after_end",
+                "2026-08-19T01:00:01+00:00",
+                {"status": "fail", "passed": False, "returncode": 1},
+            ),
+            TraceEvent(
+                run_id,
+                3,
+                "run_end",
+                "2026-08-19T01:00:02+00:00",
+                {
+                    "passed": False,
+                    "final_status": "fail",
+                    "failure_reason": "tests_after_failed",
+                    "elapsed_time": 2.0,
+                },
+            ),
+        )
+        storage.save_run(
+            EvalResult(
+                case_id="case-a",
+                passed=False,
+                tests_before_passed=False,
+                tests_after_passed=False,
+                run_id=run_id,
+                trace=trace,
+                experiment_id=experiment.experiment_id,
+                trial_index=1,
+            ),
+            "dataset.yaml",
+        )
+
+        metrics = storage.get_experiment_metrics(experiment.experiment_id)
+
+    assert metrics.failure_types == (("tests_after_failed", 1),)
+
+
 def test_repo_doctor_preflight_aborts_without_runs_or_secret(
     monkeypatch,
     fake_repo_doctor_project: Path,
