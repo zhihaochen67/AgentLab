@@ -244,7 +244,3 @@ The test suite covers the runner, workspace-change contract, adapters, resumable
 ## Project Status
 
 AgentLab is a functional evaluation platform under active development. It runs single-machine, sequential experiments today: no distributed orchestration, no token/cost tracking, no experiment-level suspension, and no automatic agent onboarding — an agent participates through an adapter you write. Test and Repo Doctor subprocesses are bounded, but the limits are fixed runtime defaults rather than per-command CLI controls. The deterministic evaluation core, resumable single-case runtime, experiment persistence, comparison, and evaluator pipeline (including the real OpenAI-compatible judge runtime) are implemented and tested.
-
-## License
-
-MIT
