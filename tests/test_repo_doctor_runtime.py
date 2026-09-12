@@ -124,7 +124,7 @@ def test_structured_suspension_and_resume_use_only_repo_doctor_session(
         return subprocess.CompletedProcess(command, 0, "request secret-id consumed", "")
 
     monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
-    adapter = RepoDoctorAdapter()
+    adapter = RepoDoctorAdapter(trusted_execution=True)
     try:
         with pytest.raises(AgentSuspended) as captured:
             adapter.repair(workspace, "fix it")
@@ -166,10 +166,12 @@ def test_resume_reconciles_already_terminal_repo_doctor_state(
     (workspace / "requirements.txt").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         "agentlab.adapters.repo_doctor.run_process",
-        lambda *_args, **_kwargs: pytest.fail("terminal reconciliation must not relaunch"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "terminal reconciliation must not relaunch"
+        ),
     )
 
-    result = RepoDoctorAdapter().resume(
+    result = RepoDoctorAdapter(trusted_execution=True).resume(
         workspace,
         AgentResumeHandle(
             "repo_doctor",
@@ -226,7 +228,7 @@ def test_structured_terminal_failure_is_not_suspension(
     monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
     try:
         with pytest.raises(AgentExecutionError, match=phase):
-            RepoDoctorAdapter().repair(workspace, "fix it")
+            RepoDoctorAdapter(trusted_execution=True).repair(workspace, "fix it")
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -246,7 +248,7 @@ def test_malformed_lifecycle_fails_closed_and_stdout_never_suspends(
 
     monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", malformed)
     with pytest.raises(ValueError, match="unexpected schema"):
-        RepoDoctorAdapter().repair(workspace, "fix it")
+        RepoDoctorAdapter(trusted_execution=True).repair(workspace, "fix it")
     shutil.rmtree(workspace, ignore_errors=True)
 
     other_root = tmp_path / "other"
@@ -258,7 +260,7 @@ def test_malformed_lifecycle_fails_closed_and_stdout_never_suspends(
 
     monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", prose_only)
     try:
-        result = RepoDoctorAdapter().repair(workspace, "fix it")
+        result = RepoDoctorAdapter(trusted_execution=True).repair(workspace, "fix it")
         assert result.returncode == 0
         assert result.stdout == ""
         assert result.stderr == ""

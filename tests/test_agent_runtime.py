@@ -177,6 +177,50 @@ def test_successful_resume_preserves_run_workspace_and_persists_final_run(
         load_active_execution_session(suspended.execution_id, root=tmp_path / "state")
 
 
+def test_resume_uses_persisted_post_pytest_pre_agent_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adapter = ResumableAgent()
+    case = _case(tmp_path)
+    case.expected = {"modified_files": ["completed.txt"]}
+
+    def pytest_before(workspace: Path) -> PytestRunResult:
+        (workspace / "generated.txt").write_text("baseline\n", encoding="utf-8")
+        return _pytest_result(False)
+
+    monkeypatch.setattr("agentlab.runner.run_pytest", pytest_before)
+    suspended = evaluate_case(
+        case,
+        adapter=adapter,
+        dataset="dataset.yaml",
+        database_path=tmp_path / "agentlab.db",
+        state_root=tmp_path / "state",
+    )
+    assert isinstance(suspended, EvaluationSuspended)
+    session = load_execution_session(suspended.execution_id, root=tmp_path / "state")
+    assert session.pre_agent_manifest is not None
+    assert "generated.txt" in session.pre_agent_manifest
+
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
+    )
+    result = resume_evaluation(
+        suspended.execution_id,
+        adapter=adapter,
+        state_root=tmp_path / "state",
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.passed is True
+    final = next(
+        event
+        for event in result.trace
+        if event.event_type == "final_workspace_verification_end"
+    )
+    assert final.data["passed"] is True
+
+
 def test_resume_can_suspend_again_without_restart_or_cleanup(
     tmp_path: Path,
     monkeypatch,
@@ -241,7 +285,9 @@ def test_crash_after_agent_checkpoint_recovers_without_repeating_agent(
     adapter, suspended = _suspend(tmp_path, monkeypatch)
     root = tmp_path / "state"
     database = tmp_path / "agentlab.db"
-    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    workspace = Path(
+        load_execution_session(suspended.execution_id, root=root).workspace
+    )
     monkeypatch.setattr(
         "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
     )
@@ -301,7 +347,9 @@ def test_finalizing_snapshot_recovers_before_sqlite_without_repeating_agent(
     adapter, suspended = _suspend(tmp_path, monkeypatch)
     root = tmp_path / "state"
     database = tmp_path / "agentlab.db"
-    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    workspace = Path(
+        load_execution_session(suspended.execution_id, root=root).workspace
+    )
     monkeypatch.setattr(
         "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
     )
@@ -355,7 +403,9 @@ def test_sqlite_commit_then_cleanup_crash_is_idempotently_recovered(
     adapter, suspended = _suspend(tmp_path, monkeypatch)
     root = tmp_path / "state"
     database = tmp_path / "agentlab.db"
-    workspace = Path(load_execution_session(suspended.execution_id, root=root).workspace)
+    workspace = Path(
+        load_execution_session(suspended.execution_id, root=root).workspace
+    )
     monkeypatch.setattr(
         "agentlab.runner.run_pytest", lambda _workspace: _pytest_result(True)
     )

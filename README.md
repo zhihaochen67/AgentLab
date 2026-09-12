@@ -90,7 +90,7 @@ AgentLab also supports an optional post-verification evaluator. The result below
 
 - **Agent Adapter** — the boundary between AgentLab and an agent under evaluation. Adapters implement `repair(workspace, task)` and may contribute identity metadata, preflight validation, and diagnostics.
 - **Eval Case / Dataset** — a task (`repository` + `task` description + expected properties) and a YAML collection of cases. Datasets are validated before evaluation.
-- **Run** — one completed execution of one case: workspace baseline, pytest before, agent, declared file-change verification, pytest after, an optional evaluator, a final `EvalResult`, and a full trace. A suspended execution is stored separately and is not a PASS or FAIL run.
+- **Run** — one completed repair execution: pytest must fail before the agent, the post-test workspace becomes the authoritative pre-agent baseline, the agent must satisfy the declared file-change contract, pytest must pass afterward without changing the agent's files, and then any optional evaluator runs. A suspended execution is stored separately and is not a PASS or FAIL run.
 - **Experiment** — repeated independent trials over selected cases with persisted metadata (agent version, prompt variant, notes) and aggregate metrics.
 - **Trace** — the ordered, sanitized event log of a run (`run_start`, pytest phases, `agent_end`, `evaluator_end`, errors, `run_end`) with timestamps and per-phase elapsed time.
 - **Evaluator** — any object implementing `evaluate(workspace, case) -> EvaluationOutcome` (`passed`, `score`, `feedback`, `metadata`).
@@ -135,15 +135,16 @@ For the quick-start case, the trace should show this evidence chain (run IDs and
 
 ```text
 run_start
-workspace_baseline
 pytest_before_end          FAIL
+workspace_baseline
 agent_end                  OK
 workspace_verification_end PASS
 pytest_after_end           PASS
+final_workspace_verification_end PASS
 run_end                    PASS
 ```
 
-The bundled `repo_doctor` agent runs only from a verified Repo Doctor checkout and its checkout-local virtual environment; it never falls back to a `repo-doctor` executable or package on `PATH`.
+The bundled `repo_doctor` agent runs only from a verified Repo Doctor checkout and its checkout-local virtual environment; it never falls back to a `repo-doctor` executable or package on `PATH`. Current Repo Doctor releases are preview-only by default. AgentLab therefore refuses to start or resume Repo Doctor unless the operator explicitly passes `--repo-doctor-trusted-execution`; with that consent AgentLab invokes Repo Doctor with its required `--trusted-execution` flag. Trusted execution can run repository-defined commands as the current user inside the isolated workspace and is not an OS sandbox.
 
 ## Resumable Repo Doctor Evaluations
 
@@ -152,19 +153,20 @@ Set `AGENTLAB_REPO_DOCTOR_PROJECT` to the absolute, canonical Repo Doctor checko
 When `REPO_DOCTOR_TOOLHUB_PROJECT` is configured, AgentLab starts Repo Doctor with its MCP backend. A single-case evaluation can then pause if Repo Doctor's versioned repair-session report says approval is pending:
 
 ```text
-uv run agentlab eval datasets/repo_doctor_basic.yaml --agent repo_doctor
+uv run agentlab eval datasets/repo_doctor_basic.yaml --agent repo_doctor \
+  --repo-doctor-trusted-execution
 WAITING_FOR_APPROVAL
 Execution ID: <agentlab-execution-id>
-Resume with: agentlab resume <agentlab-execution-id>
+Resume with: agentlab resume <agentlab-execution-id> --repo-doctor-trusted-execution
 ```
 
 The command exits with status 75 while waiting. The operator approves through Repo Doctor's documented ToolHub trusted-admin workflow, then resumes the preserved evaluation:
 
 ```bash
-uv run agentlab resume <agentlab-execution-id>
+uv run agentlab resume <agentlab-execution-id> --repo-doctor-trusted-execution
 ```
 
-AgentLab never approves its own operation, never treats a ToolHub request ID as authority, and never reproduces Repo Doctor's approval-state logic. Repo Doctor owns request-status reconciliation, resume-tool validation, replay protection, and ToolHub trace correlation. AgentLab stores the control-plane context needed to resume and inspect the evaluation: its execution ID, Repo Doctor's opaque repair-session ID, the marked temporary workspace path, the case snapshot, pytest-before state, source baseline digest, persistence context, and sanitized trace. Active execution sessions are bounded, versioned JSON under the platform state directory (override with absolute `AGENTLAB_STATE_ROOT`); final `EvalResult` rows remain strictly PASS or FAIL in SQLite.
+AgentLab never approves its own operation, never treats a ToolHub request ID as authority, and never reproduces Repo Doctor's approval-state logic. Repo Doctor owns request-status reconciliation, resume-tool validation, replay protection, and ToolHub trace correlation. AgentLab stores the control-plane context needed to resume and inspect the evaluation: its execution ID, Repo Doctor's opaque repair-session ID, the marked temporary workspace path, the case snapshot, pytest-before state, source baseline digest, pre-agent and post-agent manifests, persistence context, and sanitized trace. Active execution sessions are bounded, versioned JSON under the platform state directory (override with absolute `AGENTLAB_STATE_ROOT`); final `EvalResult` rows remain strictly PASS or FAIL in SQLite. Older suspended sessions that lack the authoritative post-`pytest-before` manifest fail closed and must be restarted.
 
 Each resume attempt holds a per-execution operating-system file lock. This prevents two AgentLab processes from resuming the same execution concurrently, while allowing a later process to recover a session left in `RESUMING` after the prior process exited. Before recovery, AgentLab verifies that the original repository still matches the baseline digest captured at suspension. Repo Doctor's own persisted lifecycle remains authoritative: if its opaque session already reached a terminal phase, the adapter reconciles that state without replaying the provider/tool request.
 
@@ -202,7 +204,7 @@ uv run agentlab benchmark datasets/repo_doctor_basic.yaml --agent mock_agent \
 
 Semantics worth knowing:
 
-- The evaluator runs **only after** post-tests and the declared file-change contract pass. A failed deterministic gate skips the judge entirely.
+- The evaluator runs **only after** the red-to-green pytest transition, the declared file-change contract, and final workspace-identity check pass. A failed deterministic gate skips the judge entirely.
 - The judge must return a structured JSON verdict (`passed`, `score` 0.0–1.0, `feedback`, optional `model`). Invalid responses become `ERROR` outcomes with a diagnostic error type.
 - Provider failures (timeouts, network errors, HTTP statuses, malformed bodies) are surfaced as safe, typed errors — never with keys, headers, prompts, or raw response bodies — and are persisted as evaluator `ERROR` outcomes. There is no automatic retry.
 - Every outcome lands in the normalized `evaluator_outcomes` table and feeds experiment-level evaluator metrics (coverage, pass rate, score statistics) and evaluator-aware comparisons.

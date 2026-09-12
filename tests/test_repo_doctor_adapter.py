@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -30,9 +31,46 @@ def test_repo_doctor_preflight_accepts_valid_looking_ascii_key(
     monkeypatch.setenv("REPO_DOCTOR_BASE_URL", " https://provider.invalid/v1 ")
     monkeypatch.setenv("REPO_DOCTOR_MODEL", " model-name ")
 
-    result = RepoDoctorAdapter().preflight()
+    result = RepoDoctorAdapter(trusted_execution=True).preflight()
 
     assert result.model == "model-name"
+
+
+def test_repo_doctor_requires_explicit_trusted_execution_before_launch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    workspace = create_workspace(str(source))
+    monkeypatch.setattr(
+        RepoDoctorAdapter,
+        "_launch_context",
+        lambda _self: pytest.fail("Repo Doctor must not launch without consent"),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="trusted execution is explicitly"):
+            RepoDoctorAdapter().repair(workspace, "fix VALUE")
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_repo_doctor_preflight_rejects_cli_without_trusted_execution_capability(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "sk-test_0123456789abcdef")
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "model-name")
+    (fake_repo_doctor_project / "repo_doctor" / "cli.py").write_text(
+        "# legacy CLI without the opt-in flag\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not expose.*--trusted-execution"):
+        RepoDoctorAdapter(trusted_execution=True).preflight()
 
 
 def test_repo_doctor_preflight_validates_provider_before_provenance(
@@ -158,17 +196,21 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
 
         try:
             adapter = (
-                RepoDoctorAdapter(verification_timeout=45)
+                RepoDoctorAdapter(
+                    verification_timeout=45,
+                    trusted_execution=True,
+                )
                 if configured_variant is None
                 else RepoDoctorAdapter(
                     verification_timeout=45,
                     prompt_variant=configured_variant,
+                    trusted_execution=True,
                 )
             )
             result = adapter.repair(workspace, "fix VALUE")
 
             agent_command, agent_cwd, agent_check = calls[-2]
-            assert agent_command[:9] == (
+            assert agent_command[:10] == (
                 executable,
                 "-B",
                 "-m",
@@ -176,6 +218,7 @@ def test_repo_doctor_uses_selected_prompt_variant_in_verified_cli_shape(
                 "fix",
                 str(workspace.resolve()),
                 "--ai",
+                "--trusted-execution",
                 "--prompt-variant",
                 expected_variant,
             )
@@ -208,13 +251,52 @@ def test_repo_doctor_exposes_non_secret_execution_metadata(monkeypatch) -> None:
     adapter = RepoDoctorAdapter(
         prompt_variant="candidate-v2",
         agent_version="repo-doctor-0.2.0",
+        trusted_execution=True,
     )
 
     assert adapter.trace_metadata() == {
         "prompt_variant": "candidate-v2",
         "agent_version": "repo-doctor-0.2.0",
+        "trusted_execution": "enabled",
         "model": "deepseek-v4-flash",
     }
+
+
+def test_repo_doctor_preview_report_is_not_a_successful_repair(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="agentlab-test-") as directory:
+        source = Path(directory) / "source"
+        source.mkdir()
+        (source / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        workspace = create_workspace(str(source))
+
+        def fake_run(command, **_kwargs):
+            if "repo_doctor.cli" in command:
+                assert "--trusted-execution" in command
+                report_path = Path(command[command.index("--report-json") + 1])
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "final_status": "safe_preview",
+                            "patch_applied": False,
+                            "patch": {"diff": "-VALUE = 1\n+VALUE = 2"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "safe preview", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.subprocess.run", fake_run)
+        monkeypatch.setattr("agentlab.adapters.repo_doctor.run_process", fake_run)
+
+        try:
+            with pytest.raises(AgentExecutionError, match="preview-only"):
+                RepoDoctorAdapter(trusted_execution=True).repair(workspace, "fix VALUE")
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def test_repo_doctor_exposes_verification_failure_diagnostics(
@@ -251,7 +333,7 @@ def test_repo_doctor_exposes_verification_failure_diagnostics(
 
         try:
             with pytest.raises(AgentExecutionError) as captured:
-                RepoDoctorAdapter().repair(workspace, "fix VALUE")
+                RepoDoctorAdapter(trusted_execution=True).repair(workspace, "fix VALUE")
 
             diagnostics = captured.value.diagnostics
             assert diagnostics is not None
@@ -347,7 +429,10 @@ def test_repo_doctor_parses_structured_report_and_preserves_attempted_patch(
 
         try:
             with pytest.raises(AgentExecutionError) as captured:
-                RepoDoctorAdapter(prompt_variant="candidate-v3").repair(
+                RepoDoctorAdapter(
+                    prompt_variant="candidate-v3",
+                    trusted_execution=True,
+                ).repair(
                     workspace,
                     f"Fix VALUE without exposing api_key={secret}",
                 )

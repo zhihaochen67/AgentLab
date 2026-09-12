@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -109,6 +110,7 @@ class RepoDoctorAdapter(AgentAdapter):
     process_timeout: int = 300
     prompt_variant: str = DEFAULT_PROMPT_VARIANT
     agent_version: str | None = None
+    trusted_execution: bool = False
 
     @property
     def info(self) -> AgentInfo:
@@ -143,12 +145,17 @@ class RepoDoctorAdapter(AgentAdapter):
         missing = tuple(name for name in names if not values[name])
         if missing:
             raise AgentPreflightError(missing)
-        self._launch_context()
+        self._require_trusted_execution()
+        launch = self._launch_context()
+        self._require_trusted_execution_capability(launch)
         return AgentPreflightResult(model=values["REPO_DOCTOR_MODEL"])
 
     def trace_metadata(self) -> dict[str, str]:
         """Return the exact non-secret variant metadata used by Repo Doctor."""
         metadata = {"prompt_variant": self.prompt_variant}
+        metadata["trusted_execution"] = (
+            "enabled" if self.trusted_execution else "disabled"
+        )
         if self.agent_version is not None:
             metadata["agent_version"] = self.agent_version
         model = os.environ.get("REPO_DOCTOR_MODEL", "").strip()
@@ -159,6 +166,7 @@ class RepoDoctorAdapter(AgentAdapter):
     def repair(self, workspace: Path, task: str) -> AgentRunResult:
         """Start one task-aware repair; suspend only from Repo Doctor session JSON."""
         workspace = self._validated_workspace(workspace)
+        self._require_trusted_execution()
         launch = self._launch_context()
         scaffold = self._ensure_python_manifest(workspace)
         suspended = False
@@ -185,6 +193,7 @@ class RepoDoctorAdapter(AgentAdapter):
                     "fix",
                     str(workspace),
                     "--ai",
+                    "--trusted-execution",
                     "--prompt-variant",
                     self.prompt_variant,
                 ]
@@ -238,6 +247,16 @@ class RepoDoctorAdapter(AgentAdapter):
                     result.stderr,
                     diagnostics,
                 )
+                if diagnostics.final_status in {
+                    "safe_preview",
+                    "preview",
+                    "dry_run",
+                }:
+                    raise AgentExecutionError(
+                        "Repo Doctor returned a preview-only result instead of "
+                        "a trusted repair execution",
+                        agent_result,
+                    )
                 if result.returncode != 0:
                     failure_type = (
                         diagnostics.failure_type or AgentFailureType.UNKNOWN_AGENT_ERROR
@@ -259,6 +278,7 @@ class RepoDoctorAdapter(AgentAdapter):
     ) -> AgentRunResult:
         """Resume exactly one Repo Doctor-owned repair session."""
         workspace = self._validated_workspace(workspace)
+        self._require_trusted_execution()
         scaffold = self._validate_resume_handle(handle)
         state_root = repo_doctor_state_root()
         if state_root == workspace or workspace in state_root.parents:
@@ -292,6 +312,35 @@ class RepoDoctorAdapter(AgentAdapter):
         finally:
             if not suspended:
                 self._cleanup_after_terminal(workspace, scaffold)
+
+    def _require_trusted_execution(self) -> None:
+        if not self.trusted_execution:
+            raise ValueError(
+                "Repo Doctor repair is disabled until trusted execution is "
+                "explicitly authorized; pass --repo-doctor-trusted-execution."
+            )
+
+    @staticmethod
+    def _require_trusted_execution_capability(launch: _LaunchContext) -> None:
+        cli_path = launch.project / "repo_doctor" / "cli.py"
+        try:
+            if cli_path.stat().st_size > _MAX_REPORT_BYTES:
+                raise ValueError("Repo Doctor CLI source is unexpectedly large.")
+            syntax = ast.parse(
+                cli_path.read_text(encoding="utf-8"), filename=str(cli_path)
+            )
+        except (OSError, SyntaxError, UnicodeError) as error:
+            raise ValueError(
+                "Could not validate the configured Repo Doctor CLI capability."
+            ) from error
+        if not any(
+            isinstance(node, ast.Constant) and node.value == "--trusted-execution"
+            for node in ast.walk(syntax)
+        ):
+            raise ValueError(
+                "Configured Repo Doctor is incompatible: its CLI does not expose "
+                "the required --trusted-execution option."
+            )
 
     def _mcp_outcome(
         self,

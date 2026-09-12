@@ -11,6 +11,7 @@ from agentlab.dataset import load_dataset
 from agentlab.evaluators import EvaluationOutcome, Evaluator, LLMJudgeEvaluator
 from agentlab.models import EvalCase
 from agentlab.runner import (
+    PytestRunResult,
     PytestTimeoutError,
     UnsupportedWorkspaceSymlinkError,
     create_workspace,
@@ -269,15 +270,128 @@ def test_declared_workspace_change_contract_passes_exact_repair() -> None:
 
     assert result.passed is True
     assert [
-        event.event_type
-        for event in result.trace
-        if event.event_type.startswith("workspace_")
+        event.event_type for event in result.trace if "workspace_" in event.event_type
     ] == [
         "workspace_baseline",
         "workspace_verification_start",
         "workspace_verification_end",
+        "final_workspace_verification_start",
+        "final_workspace_verification_end",
     ]
     assert result.trace[-1].data["workspace_changes_passed"] is True
+
+
+def test_pytest_before_side_effects_are_part_of_pre_agent_baseline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    calls = 0
+
+    def side_effecting_pytest(workspace: Path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            (workspace / "generated.txt").write_text("baseline\n", encoding="utf-8")
+            return PytestRunResult(False, 1, "", "")
+        return PytestRunResult(True, 0, "", "")
+
+    monkeypatch.setattr("agentlab.runner.run_pytest", side_effecting_pytest)
+    result = evaluate_case(
+        EvalCase(
+            "addition",
+            str(repository),
+            "Fix addition",
+            {"modified_files": ["calculator.py"]},
+        ),
+        adapter=FixingAdapter(),
+    )
+
+    assert result.passed is True
+    verification = next(
+        event
+        for event in result.trace
+        if event.event_type == "workspace_verification_end"
+    )
+    assert verification.data["modified_files"] == ["calculator.py"]
+
+
+@pytest.mark.parametrize("mutation_path", ["calculator.py", "pytest-output.txt"])
+def test_pytest_after_workspace_mutation_fails_final_identity_gate(
+    tmp_path: Path,
+    monkeypatch,
+    mutation_path: str,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    calls = 0
+
+    def side_effecting_pytest(workspace: Path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (workspace / mutation_path).write_text(
+                "changed by verification\n",
+                encoding="utf-8",
+            )
+        return PytestRunResult(calls != 1, 1 if calls == 1 else 0, "", "")
+
+    class MustNotRunEvaluator:
+        def evaluate(self, workspace: Path, case: EvalCase) -> EvaluationOutcome:
+            raise AssertionError("evaluator must not run after workspace mutation")
+
+    monkeypatch.setattr("agentlab.runner.run_pytest", side_effecting_pytest)
+    result = evaluate_case(
+        EvalCase(
+            "addition",
+            str(repository),
+            "Fix addition",
+            {"modified_files": ["calculator.py"]},
+        ),
+        adapter=FixingAdapter(),
+        evaluator=MustNotRunEvaluator(),
+    )
+
+    assert result.tests_after_passed is True
+    assert result.passed is False
+    assert "pytest-after modified the workspace" in result.error
+    assert result.trace[-1].data["failure_reason"] == (
+        "verification_modified_workspace"
+    )
+    final = next(
+        event
+        for event in result.trace
+        if event.event_type == "final_workspace_verification_end"
+    )
+    assert final.data["passed"] is False
+    assert final.data["verification_modified_files"] == [mutation_path]
+    assert "evaluator_start" not in [event.event_type for event in result.trace]
+
+
+def test_runtime_rejects_already_passing_repair_baseline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    adapter = FixingAdapter()
+    monkeypatch.setattr(
+        "agentlab.runner.run_pytest",
+        lambda _workspace: PytestRunResult(True, 0, "", ""),
+    )
+
+    result = evaluate_case(
+        EvalCase("addition", str(repository), "Fix addition"),
+        adapter=adapter,
+    )
+
+    assert result.tests_before_passed is True
+    assert result.tests_after_passed is False
+    assert result.passed is False
+    assert result.error == (
+        "Repair baseline unexpectedly passed pytest; a repair evaluation "
+        "requires a failing before state."
+    )
+    assert adapter.calls == []
+    assert result.trace[-1].data["failure_reason"] == "baseline_already_passing"
 
 
 def test_agent_trace_records_variant_metadata_without_full_prompt() -> None:
@@ -289,7 +403,9 @@ def test_agent_trace_records_variant_metadata_without_full_prompt() -> None:
         )
 
     agent_events = [
-        event for event in result.trace if event.event_type in {"agent_start", "agent_end"}
+        event
+        for event in result.trace
+        if event.event_type in {"agent_start", "agent_end"}
     ]
     assert len(agent_events) == 2
     for event in agent_events:
@@ -379,15 +495,20 @@ def test_trace_redacts_secret_from_task_and_agent_output(monkeypatch) -> None:
 
 def test_evaluation_does_not_modify_original_fixture() -> None:
     fixture = Path("fixtures/calculate_total_001")
-    before = {path.name: path.read_bytes() for path in fixture.iterdir() if path.is_file()}
+    before = {
+        path.name: path.read_bytes() for path in fixture.iterdir() if path.is_file()
+    }
     case = EvalCase("calculate_total", str(fixture), "Fix calculate_total")
 
     result = evaluate_case(case, adapter=CalculateTotalAdapter())
 
-    after = {path.name: path.read_bytes() for path in fixture.iterdir() if path.is_file()}
+    after = {
+        path.name: path.read_bytes() for path in fixture.iterdir() if path.is_file()
+    }
     assert result.tests_before_passed is False
     assert result.tests_after_passed is True
     assert before == after
+
 
 def test_optional_evaluator_can_reject_green_test_suite() -> None:
     class RejectingEvaluator:
@@ -430,6 +551,7 @@ def test_optional_evaluator_can_reject_green_test_suite() -> None:
     )
     assert evaluator_events[1].data["metadata"] == {"evaluator": "rejecting-test"}
     assert result.trace[-1].data["final_status"] == "fail"
+
 
 def test_optional_evaluator_is_skipped_when_tests_fail() -> None:
     class NoOpAdapter(AgentAdapter):
@@ -608,9 +730,7 @@ def test_invalid_judge_response_fails_run_diagnostically() -> None:
     assert result.error is not None
     assert "invalid JSON" in result.error
 
-    error_event = next(
-        event for event in result.trace if event.event_type == "error"
-    )
+    error_event = next(event for event in result.trace if event.event_type == "error")
     assert error_event.data["phase"] == "evaluator"
     assert error_event.data["error_type"] == "JudgeResponseError"
     assert result.trace[-1].data["final_status"] == "fail"

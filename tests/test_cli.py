@@ -190,6 +190,7 @@ def test_cli_experiment_records_explicit_variant_metadata(
                 "repo-doctor-0.2.0",
                 "--prompt-variant",
                 "candidate-v2",
+                "--repo-doctor-trusted-execution",
                 "--notes",
                 "candidate prompt trial",
             ],
@@ -304,6 +305,25 @@ def test_cli_input_errors_are_concise_and_do_not_render_tracebacks() -> None:
     assert "Traceback" not in unknown.stdout
 
 
+def test_cli_repo_doctor_requires_explicit_trusted_execution(
+    monkeypatch,
+    fake_repo_doctor_project: Path,
+) -> None:
+    monkeypatch.setenv("REPO_DOCTOR_API_KEY", "sk-test_0123456789abcdef")
+    monkeypatch.setenv("REPO_DOCTOR_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("REPO_DOCTOR_MODEL", "model-name")
+    monkeypatch.setattr(
+        "agentlab.cli.load_dataset",
+        lambda _dataset: pytest.fail("dataset must not load before consent"),
+    )
+
+    result = CliRunner().invoke(app, ["eval", "dataset.yaml"])
+
+    assert result.exit_code == 1
+    assert "--repo-doctor-trusted-execution" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_cli_execution_history_is_inspectable(monkeypatch) -> None:
     timestamp = "2026-08-28T00:00:00+00:00"
     session = SimpleNamespace(
@@ -334,7 +354,9 @@ def test_cli_execution_history_is_inspectable(monkeypatch) -> None:
             ),
         ),
     )
-    monkeypatch.setattr("agentlab.cli.list_execution_sessions", lambda limit: (session,))
+    monkeypatch.setattr(
+        "agentlab.cli.list_execution_sessions", lambda limit: (session,)
+    )
     monkeypatch.setattr("agentlab.cli.load_execution_session", lambda _value: session)
 
     listing = CliRunner().invoke(app, ["executions"])
@@ -379,6 +401,7 @@ def test_cli_experiment_accepts_agent_selection(
                 "dataset.yaml",
                 "--agent",
                 "repo_doctor",
+                "--repo-doctor-trusted-execution",
             ],
         )
 
@@ -525,9 +548,7 @@ def test_cli_resume_uses_stored_context_and_persists_completion(
     )
     completed = EvalResult("case-a", True, False, True, run_id="run-1", trace=trace)
     observed = {}
-    monkeypatch.setattr(
-        "agentlab.cli.load_execution_session", lambda value: session
-    )
+    monkeypatch.setattr("agentlab.cli.load_execution_session", lambda value: session)
 
     def fake_resume(value, *, adapter, evaluator):
         observed.update(value=value, adapter=adapter.info.name, evaluator=evaluator)

@@ -49,6 +49,21 @@ console = Console()
 SUSPENDED_EXIT_CODE = 75
 
 
+def _adapter_options(
+    agent: str,
+    *,
+    repo_doctor_trusted_execution: bool,
+    **options,
+) -> dict:
+    if repo_doctor_trusted_execution and agent != "repo_doctor":
+        raise ValueError(
+            "--repo-doctor-trusted-execution can only be used with --agent repo_doctor."
+        )
+    if agent == "repo_doctor":
+        options["trusted_execution"] = repo_doctor_trusted_execution
+    return options
+
+
 @agents_app.command("list")
 def list_agents():
     """List available agents."""
@@ -93,13 +108,27 @@ def run_eval(
         "--evaluator",
         help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
+    repo_doctor_trusted_execution: bool = typer.Option(
+        False,
+        "--repo-doctor-trusted-execution",
+        help=(
+            "Authorize Repo Doctor to apply patches and execute repository-defined "
+            "code as the current user. Execution is NOT sandboxed."
+        ),
+    ),
 ):
     """Run an AgentLab evaluation dataset."""
 
     try:
         selected_evaluator = create_evaluator(evaluator)
         registry = create_default_registry()
-        selected_adapter = registry.create(agent)
+        selected_adapter = registry.create(
+            agent,
+            **_adapter_options(
+                agent,
+                repo_doctor_trusted_execution=repo_doctor_trusted_execution,
+            ),
+        )
         selected_adapter.preflight()
         cases = load_dataset(dataset)
         storage = _open_storage()
@@ -191,18 +220,36 @@ def run_eval(
 
 
 @app.command("resume")
-def resume_execution(execution_id: str):
+def resume_execution(
+    execution_id: str,
+    repo_doctor_trusted_execution: bool = typer.Option(
+        False,
+        "--repo-doctor-trusted-execution",
+        help=(
+            "Authorize Repo Doctor to apply patches and execute repository-defined "
+            "code as the current user. Execution is NOT sandboxed."
+        ),
+    ),
+):
     """Resume one persisted single-case evaluation execution."""
     try:
         session = load_execution_session(execution_id)
-        selected_adapter = (
-            None
-            if session.status in {
-                ExecutionStatus.VERIFYING,
-                ExecutionStatus.FINALIZING,
-            }
-            else create_default_registry().create(session.adapter)
-        )
+        if repo_doctor_trusted_execution and session.adapter != "repo_doctor":
+            raise ValueError(
+                "--repo-doctor-trusted-execution does not apply to this execution."
+            )
+        selected_adapter = None
+        if session.status not in {
+            ExecutionStatus.VERIFYING,
+            ExecutionStatus.FINALIZING,
+        }:
+            selected_adapter = create_default_registry().create(
+                session.adapter,
+                **_adapter_options(
+                    session.adapter,
+                    repo_doctor_trusted_execution=(repo_doctor_trusted_execution),
+                ),
+            )
         selected_evaluator = (
             create_evaluator(session.evaluator)
             if session.evaluator is not None
@@ -244,7 +291,10 @@ def _render_suspended(result: EvaluationSuspended) -> None:
     console.print(
         "Approve externally through the Repo Doctor / ToolHub trusted admin workflow."
     )
-    console.print(f"Resume with: agentlab resume {result.execution_id}")
+    console.print(
+        "Resume with: agentlab resume "
+        f"{result.execution_id} --repo-doctor-trusted-execution"
+    )
 
 
 @app.command("executions")
@@ -403,6 +453,14 @@ def run_experiment_command(
         "--evaluator",
         help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
+    repo_doctor_trusted_execution: bool = typer.Option(
+        False,
+        "--repo-doctor-trusted-execution",
+        help=(
+            "Authorize Repo Doctor to apply patches and execute repository-defined "
+            "code as the current user. Execution is NOT sandboxed."
+        ),
+    ),
 ):
     """Run a persisted repeated-trial evaluation experiment."""
     try:
@@ -417,8 +475,12 @@ def run_experiment_command(
         storage = _open_storage()
         selected_adapter = create_default_registry().create(
             agent,
-            prompt_variant=effective_prompt_variant,
-            agent_version=agent_version,
+            **_adapter_options(
+                agent,
+                repo_doctor_trusted_execution=repo_doctor_trusted_execution,
+                prompt_variant=effective_prompt_variant,
+                agent_version=agent_version,
+            ),
         )
         execution = run_experiment(
             cases=cases,
@@ -447,9 +509,7 @@ def run_experiment_command(
         TypeError,
         ValueError,
     ) as error:
-        console.print(
-            f"[red]Experiment aborted: {_error_message(error)}[/red]"
-        )
+        console.print(f"[red]Experiment aborted: {_error_message(error)}[/red]")
         if isinstance(error, ExperimentAbortedError):
             console.print(f"Experiment: {error.experiment_id}")
         raise typer.Exit(1) from error
@@ -490,6 +550,14 @@ def run_benchmark(
         "--evaluator",
         help="Evaluator after the deterministic gate: 'none' or 'llm_judge'.",
     ),
+    repo_doctor_trusted_execution: bool = typer.Option(
+        False,
+        "--repo-doctor-trusted-execution",
+        help=(
+            "Authorize Repo Doctor to apply patches and execute repository-defined "
+            "code as the current user. Execution is NOT sandboxed."
+        ),
+    ),
 ):
     """Run a benchmark evaluation for one agent."""
 
@@ -506,8 +574,12 @@ def run_benchmark(
         storage = _open_storage()
         selected_adapter = create_default_registry().create(
             agent,
-            agent_version=agent_version,
-            prompt_variant=effective_prompt_variant,
+            **_adapter_options(
+                agent,
+                repo_doctor_trusted_execution=repo_doctor_trusted_execution,
+                agent_version=agent_version,
+                prompt_variant=effective_prompt_variant,
+            ),
         )
         execution: ExperimentExecution = run_experiment(
             cases=cases,
@@ -550,9 +622,7 @@ def show_recent_experiments():
     try:
         experiments = _open_storage().list_experiments(limit=20)
     except StorageError as error:
-        console.print(
-            f"[red]Could not list experiments: {_error_message(error)}[/red]"
-        )
+        console.print(f"[red]Could not list experiments: {_error_message(error)}[/red]")
         raise typer.Exit(1) from error
     if not experiments:
         console.print("No experiments yet.")
@@ -945,8 +1015,7 @@ def _render_trace(
     for event in events:
         status = ""
         if (
-            event.event_type.startswith("pytest_")
-            and event.event_type.endswith("_end")
+            event.event_type.startswith("pytest_") and event.event_type.endswith("_end")
         ) or event.event_type == "workspace_verification_end":
             if event.data.get("status") == "error":
                 status = "[red]ERROR[/red]"

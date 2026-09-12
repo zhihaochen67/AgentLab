@@ -228,14 +228,19 @@ def test_trials_filter_persistence_continuation_and_aggregates() -> None:
         assert metrics.failed_runs == 1
         assert metrics.success_rate == 75.0
         assert metrics.average_latency == 2.5
-        assert [(case.case_id, case.passed_runs, case.success_rate) for case in metrics.per_case] == [
+        assert [
+            (case.case_id, case.passed_runs, case.success_rate)
+            for case in metrics.per_case
+        ] == [
             ("case-a", 1, 50.0),
             ("case-c", 2, 100.0),
         ]
         assert metrics.failure_types == (("timeout", 1),)
 
 
-def test_failure_taxonomy_uses_run_level_gate_reason_without_agent_diagnostics() -> None:
+def test_failure_taxonomy_uses_run_level_gate_reason_without_agent_diagnostics() -> (
+    None
+):
     with tempfile.TemporaryDirectory(prefix="agentlab-experiment-") as directory:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         experiment = make_experiment("gate-failure")
@@ -311,7 +316,7 @@ def test_repo_doctor_preflight_aborts_without_runs_or_secret(
                 cases=[EvalCase("case-a", "unused", "Fix A")],
                 dataset="dataset.yaml",
                 storage=storage,
-                adapter=RepoDoctorAdapter(),
+                adapter=RepoDoctorAdapter(trusted_execution=True),
                 trials_per_case=3,
                 case_executor=forbidden_evaluator,
                 validator=lambda _cases: pytest.fail("validation must not run"),
@@ -368,7 +373,7 @@ def test_invalid_api_key_aborts_before_evaluation_repair_or_network(
                 cases=[EvalCase("case-a", "unused", "Fix A")],
                 dataset="dataset.yaml",
                 storage=storage,
-                adapter=RepoDoctorAdapter(),
+                adapter=RepoDoctorAdapter(trusted_execution=True),
                 trials_per_case=3,
                 case_executor=forbidden_evaluator,
                 validator=lambda _cases: pytest.fail("validation must not run"),
@@ -444,9 +449,7 @@ def test_old_database_is_readable_and_migrates_without_losing_runs() -> None:
         migrated = SQLiteStorage(database)
         migrated_legacy = migrated.get_run("legacy-run")
         with closing(sqlite3.connect(database)) as connection:
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(runs)")
-            }
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
             experiment_table = connection.execute(
                 """
                 SELECT 1 FROM sqlite_master

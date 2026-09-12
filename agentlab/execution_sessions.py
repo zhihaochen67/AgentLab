@@ -20,7 +20,7 @@ from agentlab.models import EvalCase
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
 STATE_ROOT_ENV = "AGENTLAB_STATE_ROOT"
-SESSION_SCHEMA_VERSION = 3
+SESSION_SCHEMA_VERSION = 4
 MAX_EXECUTION_SESSION_BYTES = 1_000_000
 MAX_CASE_EXPECTED_ITEMS = 200
 MAX_TRACE_EVENTS = 2_000
@@ -81,6 +81,8 @@ class ExecutionSession:
     evaluator: str | None = None
     database_path: str | None = None
     baseline_digest: str | None = None
+    pre_agent_manifest: dict[str, str] | None = None
+    post_agent_manifest: dict[str, str] | None = None
     final_result: ExecutionFinalResult | None = None
     schema_version: int = SESSION_SCHEMA_VERSION
 
@@ -405,6 +407,8 @@ def _session_to_data(session: ExecutionSession) -> dict[str, Any]:
         "evaluator": session.evaluator,
         "database_path": session.database_path,
         "baseline_digest": session.baseline_digest,
+        "pre_agent_manifest": session.pre_agent_manifest,
+        "post_agent_manifest": session.post_agent_manifest,
         "final_result": (
             {
                 "passed": session.final_result.passed,
@@ -439,16 +443,18 @@ def _session_from_data(value: object) -> ExecutionSession:
     }
     unvalidated = _object(value, "execution session")
     version = _integer(unvalidated.get("schema_version"), "schema_version")
-    if version not in {1, 2, SESSION_SCHEMA_VERSION}:
+    if version not in {1, 2, 3, SESSION_SCHEMA_VERSION}:
         raise ExecutionSessionError(
             f"Unsupported execution-session schema version {version}; "
-            f"expected 1, 2, or {SESSION_SCHEMA_VERSION}."
+            f"expected a version from 1 through {SESSION_SCHEMA_VERSION}."
         )
     keys = base_keys
     if version >= 2:
         keys |= {"baseline_digest"}
     if version >= 3:
         keys |= {"final_result"}
+    if version >= 4:
+        keys |= {"pre_agent_manifest", "post_agent_manifest"}
     data = _object(value, "execution session", keys)
     execution_id = _execution_id(data["execution_id"])
     run_id = _identity(data["run_id"], "run_id")
@@ -515,11 +521,18 @@ def _session_from_data(value: object) -> ExecutionSession:
         raise ExecutionSessionError("database_path must be absolute when present.")
     baseline_digest = None
     if version >= 2:
-        baseline_digest = _optional_text(
-            data["baseline_digest"], "baseline_digest", 64
-        )
+        baseline_digest = _optional_text(data["baseline_digest"], "baseline_digest", 64)
         if baseline_digest is not None and _DIGEST.fullmatch(baseline_digest) is None:
             raise ExecutionSessionError("baseline_digest is invalid.")
+    pre_agent_manifest = None
+    post_agent_manifest = None
+    if version >= 4:
+        pre_agent_manifest = _workspace_manifest(
+            data["pre_agent_manifest"], "pre_agent_manifest"
+        )
+        post_agent_manifest = _workspace_manifest(
+            data["post_agent_manifest"], "post_agent_manifest"
+        )
     final_result = None
     if version >= 3 and data["final_result"] is not None:
         result_data = _object(
@@ -537,11 +550,15 @@ def _session_from_data(value: object) -> ExecutionSession:
         )
     if status is ExecutionStatus.FINALIZING and final_result is None:
         raise ExecutionSessionError("FINALIZING execution requires a final result.")
-    if status in {
-        ExecutionStatus.WAITING_FOR_APPROVAL,
-        ExecutionStatus.RESUMING,
-        ExecutionStatus.VERIFYING,
-    } and final_result is not None:
+    if (
+        status
+        in {
+            ExecutionStatus.WAITING_FOR_APPROVAL,
+            ExecutionStatus.RESUMING,
+            ExecutionStatus.VERIFYING,
+        }
+        and final_result is not None
+    ):
         raise ExecutionSessionError(
             f"{status.value} execution cannot contain a final result."
         )
@@ -580,9 +597,33 @@ def _session_from_data(value: object) -> ExecutionSession:
         evaluator=_optional_text(data["evaluator"], "evaluator", 128),
         database_path=database_path,
         baseline_digest=baseline_digest,
+        pre_agent_manifest=pre_agent_manifest,
+        post_agent_manifest=post_agent_manifest,
         final_result=final_result,
         schema_version=SESSION_SCHEMA_VERSION,
     )
+
+
+def _workspace_manifest(value: object, label: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    data = _object(value, label)
+    manifest: dict[str, str] = {}
+    for raw_path, raw_digest in data.items():
+        if not raw_path or len(raw_path) > 8_000:
+            raise ExecutionSessionError(f"{label} contains an invalid path.")
+        relative = Path(raw_path)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != raw_path
+        ):
+            raise ExecutionSessionError(f"{label} contains an unsafe path.")
+        digest = _text(raw_digest, f"{label}.{raw_path}", 64)
+        if _DIGEST.fullmatch(digest) is None:
+            raise ExecutionSessionError(f"{label} contains an invalid digest.")
+        manifest[raw_path] = digest
+    return manifest
 
 
 def _trace_event(value: object, index: int, run_id: str) -> TraceEvent:

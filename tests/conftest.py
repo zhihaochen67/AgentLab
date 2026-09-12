@@ -12,7 +12,10 @@ def fake_repo_doctor_project(tmp_path: Path, monkeypatch) -> Path:
     project = (tmp_path / "repo-doctor").resolve()
     cli = project / "repo_doctor" / "cli.py"
     cli.parent.mkdir(parents=True)
-    cli.write_text("# test Repo Doctor CLI\n", encoding="utf-8")
+    cli.write_text(
+        'TRUSTED_EXECUTION_OPTION = "--trusted-execution"\n',
+        encoding="utf-8",
+    )
 
     interpreter = project / ".venv"
     if os.name == "nt":

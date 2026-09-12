@@ -73,6 +73,15 @@ class WorkspaceChangeResult:
     unexpected_files: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class FinalWorkspaceVerificationResult:
+    """Final contract evidence after the post-repair test command has run."""
+
+    passed: bool
+    verification_modified_files: tuple[str, ...]
+    contract: WorkspaceChangeResult
+
+
 PYTEST_TIMEOUT_SECONDS = 120
 _IGNORED_WORKSPACE_DIRECTORIES = frozenset({".git", ".pytest_cache", "__pycache__"})
 _IGNORED_WORKSPACE_FILES = frozenset({WORKSPACE_MARKER})
@@ -432,8 +441,8 @@ def _run_traced_resume(
 
 
 def _run_traced_workspace_verification(
-    workspace: Path,
     baseline: dict[str, str],
+    current: dict[str, str],
     expected_files: tuple[str, ...],
     tracer: Tracer,
 ) -> WorkspaceChangeResult:
@@ -445,7 +454,7 @@ def _run_traced_workspace_verification(
     try:
         result = verify_workspace_changes(
             baseline,
-            workspace_manifest(workspace),
+            current,
             expected_files,
         )
     except Exception as error:
@@ -463,14 +472,63 @@ def _run_traced_workspace_verification(
         passed=result.passed,
         modified_file_count=len(result.modified_files),
         modified_files=list(result.modified_files[:_MAX_TRACE_PATHS]),
-        missing_expected_files=list(
-            result.missing_expected_files[:_MAX_TRACE_PATHS]
-        ),
+        missing_expected_files=list(result.missing_expected_files[:_MAX_TRACE_PATHS]),
         unexpected_files=list(result.unexpected_files[:_MAX_TRACE_PATHS]),
         paths_truncated=len(result.modified_files) > _MAX_TRACE_PATHS,
         elapsed_time=_elapsed(tracer, started_at),
     )
     return result
+
+
+def _run_traced_final_workspace_verification(
+    baseline: dict[str, str],
+    post_agent: dict[str, str],
+    final: dict[str, str],
+    expected_files: tuple[str, ...],
+    tracer: Tracer,
+) -> FinalWorkspaceVerificationResult:
+    """Require pytest-after to preserve the exact agent-produced workspace."""
+    tracer.emit(
+        "final_workspace_verification_start",
+        expected_modified_files=list(expected_files),
+    )
+    started_at = tracer.start_timer()
+    verification_changes = verify_workspace_changes(post_agent, final, ())
+    final_contract = verify_workspace_changes(baseline, final, expected_files)
+    result = FinalWorkspaceVerificationResult(
+        passed=not verification_changes.modified_files and final_contract.passed,
+        verification_modified_files=verification_changes.modified_files,
+        contract=final_contract,
+    )
+    tracer.emit(
+        "final_workspace_verification_end",
+        status="pass" if result.passed else "fail",
+        passed=result.passed,
+        contract_passed=final_contract.passed,
+        verification_modified_file_count=len(result.verification_modified_files),
+        verification_modified_files=list(
+            result.verification_modified_files[:_MAX_TRACE_PATHS]
+        ),
+        missing_expected_files=list(
+            final_contract.missing_expected_files[:_MAX_TRACE_PATHS]
+        ),
+        unexpected_files=list(final_contract.unexpected_files[:_MAX_TRACE_PATHS]),
+        paths_truncated=(
+            len(result.verification_modified_files) > _MAX_TRACE_PATHS
+            or len(final_contract.missing_expected_files) > _MAX_TRACE_PATHS
+            or len(final_contract.unexpected_files) > _MAX_TRACE_PATHS
+        ),
+        elapsed_time=_elapsed(tracer, started_at),
+    )
+    return result
+
+
+def _verification_side_effect_error(modified_files: tuple[str, ...]) -> str:
+    paths = ", ".join(modified_files[:_MAX_TRACE_PATHS])
+    return (
+        "pytest-after modified the workspace after agent execution "
+        f"({paths}); final tested files no longer match the agent output."
+    )
 
 
 def _remove_readonly(function, path: str, _error) -> None:
@@ -568,12 +626,15 @@ def _cleanup_and_finish(
         failure_reason = failure_reason or "cleanup_error"
     passed = (
         error_message is None
+        and not before_passed
         and after_passed
         and evaluator_passed
         and workspace_changes_passed
     )
     if not passed and failure_reason is None:
-        if not workspace_changes_passed:
+        if before_passed:
+            failure_reason = "baseline_already_passing"
+        elif not workspace_changes_passed:
             failure_reason = "workspace_contract_failed"
         elif not after_passed:
             failure_reason = "tests_after_failed"
@@ -619,7 +680,8 @@ def evaluate_case(
     active_tracer = tracer or Tracer()
     active_adapter = adapter or RepoDoctorAdapter()
     workspace: Path | None = None
-    baseline: dict[str, str] | None = None
+    pre_agent_manifest: dict[str, str] | None = None
+    post_agent_manifest: dict[str, str] | None = None
     baseline_digest: str | None = None
     expected_files: tuple[str, ...] | None = None
     before_passed = False
@@ -641,44 +703,85 @@ def evaluate_case(
         expected_files = _expected_modified_files(case)
         workspace = create_workspace(case.repository)
         if expected_files is not None:
-            baseline = workspace_manifest(workspace)
-            baseline_digest = workspace_manifest_digest(baseline)
-            active_tracer.emit(
-                "workspace_baseline",
-                file_count=len(baseline),
-                digest=baseline_digest,
-                expected_modified_files=list(expected_files),
-            )
+            baseline_digest = workspace_manifest_digest(workspace_manifest(workspace))
         phase = "pytest_before"
         before_result = _run_traced_pytest(workspace, active_tracer, phase)
         before_passed = before_result.passed
-        phase = "agent"
-        _run_traced_agent(active_adapter, workspace, case.task, active_tracer)
-        if baseline is not None and expected_files is not None:
-            phase = "workspace_verification"
-            changes = _run_traced_workspace_verification(
-                workspace,
-                baseline,
-                expected_files,
-                active_tracer,
+        if before_passed:
+            error_message = (
+                "Repair baseline unexpectedly passed pytest; a repair evaluation "
+                "requires a failing before state."
             )
-            workspace_changes_passed = changes.passed
-            if not changes.passed:
-                error_message = _workspace_change_error(changes)
-                failure_reason = "workspace_contract_failed"
-        phase = "pytest_after"
-        after_result = _run_traced_pytest(workspace, active_tracer, phase)
-        after_passed = after_result.passed
-        if evaluator is not None and after_passed and workspace_changes_passed:
-            phase = "evaluator"
-            evaluator_outcome = _run_traced_evaluator(
-                evaluator, workspace, case, active_tracer
-            )
-            evaluator_passed = evaluator_outcome.passed
-            if not evaluator_passed:
-                failure_reason = "evaluator_failed"
-        if not after_passed and failure_reason is None:
-            failure_reason = "tests_after_failed"
+            failure_reason = "baseline_already_passing"
+        else:
+            if expected_files is not None:
+                pre_agent_manifest = workspace_manifest(workspace)
+                pre_agent_digest = workspace_manifest_digest(pre_agent_manifest)
+                active_tracer.emit(
+                    "workspace_baseline",
+                    file_count=len(pre_agent_manifest),
+                    digest=pre_agent_digest,
+                    expected_modified_files=list(expected_files),
+                )
+            phase = "agent"
+            _run_traced_agent(active_adapter, workspace, case.task, active_tracer)
+            if pre_agent_manifest is not None and expected_files is not None:
+                post_agent_manifest = workspace_manifest(workspace)
+                phase = "workspace_verification"
+                changes = _run_traced_workspace_verification(
+                    pre_agent_manifest,
+                    post_agent_manifest,
+                    expected_files,
+                    active_tracer,
+                )
+                workspace_changes_passed = changes.passed
+                if not changes.passed:
+                    error_message = _workspace_change_error(changes)
+                    failure_reason = "workspace_contract_failed"
+            phase = "pytest_after"
+            after_result = _run_traced_pytest(workspace, active_tracer, phase)
+            after_passed = after_result.passed
+            if (
+                pre_agent_manifest is not None
+                and post_agent_manifest is not None
+                and expected_files is not None
+            ):
+                phase = "final_workspace_verification"
+                final_verification = _run_traced_final_workspace_verification(
+                    pre_agent_manifest,
+                    post_agent_manifest,
+                    workspace_manifest(workspace),
+                    expected_files,
+                    active_tracer,
+                )
+                agent_contract_passed = workspace_changes_passed
+                workspace_changes_passed = (
+                    agent_contract_passed and final_verification.passed
+                )
+                if final_verification.verification_modified_files:
+                    error_message = _combine_error(
+                        error_message,
+                        _verification_side_effect_error(
+                            final_verification.verification_modified_files
+                        ),
+                    )
+                    failure_reason = failure_reason or "verification_modified_workspace"
+                if agent_contract_passed and not final_verification.contract.passed:
+                    error_message = _combine_error(
+                        error_message,
+                        _workspace_change_error(final_verification.contract),
+                    )
+                    failure_reason = failure_reason or "workspace_contract_failed"
+            if evaluator is not None and after_passed and workspace_changes_passed:
+                phase = "evaluator"
+                evaluator_outcome = _run_traced_evaluator(
+                    evaluator, workspace, case, active_tracer
+                )
+                evaluator_passed = evaluator_outcome.passed
+                if not evaluator_passed:
+                    failure_reason = "evaluator_failed"
+            if not after_passed and failure_reason is None:
+                failure_reason = "tests_after_failed"
     except AgentSuspended as suspended:
         if workspace is None:
             raise RuntimeError(
@@ -733,6 +836,8 @@ def evaluate_case(
             dataset=dataset,
             evaluator=evaluator_name,
             baseline_digest=baseline_digest,
+            pre_agent_manifest=pre_agent_manifest,
+            post_agent_manifest=post_agent_manifest,
             database_path=(
                 str(Path(database_path).expanduser().resolve(strict=False))
                 if database_path is not None
@@ -855,9 +960,7 @@ def _finalize_execution(
 
     terminal = replace(
         session,
-        status=(
-            ExecutionStatus.COMPLETED if result.passed else ExecutionStatus.FAILED
-        ),
+        status=(ExecutionStatus.COMPLETED if result.passed else ExecutionStatus.FAILED),
         updated_at=now_timestamp(),
     )
     try:
@@ -883,25 +986,34 @@ def _resume_evaluation_locked(
 
     workspace = validate_preserved_workspace(session.workspace)
     expected_files = _expected_modified_files(session.case)
-    baseline: dict[str, str] | None = None
+    pre_agent_manifest = session.pre_agent_manifest
+    post_agent_manifest = session.post_agent_manifest
     if expected_files is not None:
         try:
-            baseline = workspace_manifest(session.case.repository)
+            source_baseline = workspace_manifest(session.case.repository)
         except UnsupportedWorkspaceSymlinkError as error:
-            raise ExecutionSessionError(
-                f"Cannot resume execution: {error}"
-            ) from error
+            raise ExecutionSessionError(f"Cannot resume execution: {error}") from error
         except OSError as error:
             raise ExecutionSessionError(
                 "Could not read the original repository baseline for resume."
             ) from error
-        current_digest = workspace_manifest_digest(baseline)
+        current_digest = workspace_manifest_digest(source_baseline)
         if (
             session.baseline_digest is not None
             and current_digest != session.baseline_digest
         ):
             raise ExecutionSessionError(
                 "Original repository changed while execution was suspended."
+            )
+        if pre_agent_manifest is None:
+            raise ExecutionSessionError(
+                "Cannot resume this execution without its authoritative pre-agent "
+                "workspace manifest; restart the evaluation."
+            )
+        if session.status is ExecutionStatus.VERIFYING and post_agent_manifest is None:
+            raise ExecutionSessionError(
+                "Cannot resume verification without its persisted post-agent "
+                "workspace manifest; restart the evaluation."
             )
     if session.evaluator is not None and evaluator is None:
         raise ExecutionSessionError(
@@ -919,7 +1031,13 @@ def _resume_evaluation_locked(
     error_message: str | None = None
     failure_reason: str | None = None
     phase = "agent"
-    if session.status is not ExecutionStatus.VERIFYING:
+    if session.tests_before_passed:
+        error_message = (
+            "Repair baseline unexpectedly passed pytest; a repair evaluation "
+            "requires a failing before state."
+        )
+        failure_reason = "baseline_already_passing"
+    if error_message is None and session.status is not ExecutionStatus.VERIFYING:
         active_adapter = adapter
         if active_adapter is None:
             try:
@@ -937,6 +1055,8 @@ def _resume_evaluation_locked(
         )
         try:
             _run_traced_resume(active_adapter, workspace, session, tracer)
+            if expected_files is not None:
+                post_agent_manifest = workspace_manifest(workspace)
         except AgentSuspended as suspended:
             if suspended.handle.adapter != session.adapter:
                 error = ValueError(
@@ -976,27 +1096,79 @@ def _resume_evaluation_locked(
                 trace=tracer.events,
                 elapsed_seconds=tracer.total_elapsed(),
                 status=ExecutionStatus.VERIFYING,
+                post_agent_manifest=post_agent_manifest,
                 updated_at=now_timestamp(),
             )
             save_execution_session(session, root=state_root)
 
     if error_message is None:
         try:
-            if baseline is not None and expected_files is not None:
+            if (
+                pre_agent_manifest is not None
+                and post_agent_manifest is not None
+                and expected_files is not None
+            ):
+                current_post_agent = workspace_manifest(workspace)
+                if current_post_agent != post_agent_manifest:
+                    changed = verify_workspace_changes(
+                        post_agent_manifest,
+                        current_post_agent,
+                        (),
+                    ).modified_files
+                    error_message = (
+                        "Preserved workspace changed after agent execution "
+                        f"({', '.join(changed[:_MAX_TRACE_PATHS])})."
+                    )
+                    failure_reason = "post_agent_workspace_drift"
+                    workspace_changes_passed = False
                 phase = "workspace_verification"
                 changes = _run_traced_workspace_verification(
-                    workspace,
-                    baseline,
+                    pre_agent_manifest,
+                    post_agent_manifest,
                     expected_files,
                     tracer,
                 )
-                workspace_changes_passed = changes.passed
+                workspace_changes_passed = workspace_changes_passed and changes.passed
                 if not changes.passed:
-                    error_message = _workspace_change_error(changes)
-                    failure_reason = "workspace_contract_failed"
+                    error_message = _combine_error(
+                        error_message,
+                        _workspace_change_error(changes),
+                    )
+                    failure_reason = failure_reason or "workspace_contract_failed"
             phase = "pytest_after"
             after_result = _run_traced_pytest(workspace, tracer, phase)
             after_passed = after_result.passed
+            if (
+                pre_agent_manifest is not None
+                and post_agent_manifest is not None
+                and expected_files is not None
+            ):
+                phase = "final_workspace_verification"
+                final_verification = _run_traced_final_workspace_verification(
+                    pre_agent_manifest,
+                    post_agent_manifest,
+                    workspace_manifest(workspace),
+                    expected_files,
+                    tracer,
+                )
+                agent_contract_passed = workspace_changes_passed
+                workspace_changes_passed = (
+                    agent_contract_passed and final_verification.passed
+                )
+                if final_verification.verification_modified_files:
+                    error_message = _combine_error(
+                        error_message,
+                        _verification_side_effect_error(
+                            final_verification.verification_modified_files
+                        ),
+                    )
+                    failure_reason = failure_reason or "verification_modified_workspace"
+                if agent_contract_passed and not final_verification.contract.passed:
+                    error_message = _combine_error(
+                        error_message,
+                        _workspace_change_error(final_verification.contract),
+                    )
+                    failure_reason = failure_reason or "workspace_contract_failed"
             if evaluator is not None and after_passed and workspace_changes_passed:
                 phase = "evaluator"
                 evaluator_outcome = _run_traced_evaluator(
