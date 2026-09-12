@@ -12,7 +12,7 @@ from agentlab.adapters import AgentAdapter, AgentPreflightError
 from agentlab.dataset import validate_dataset
 from agentlab.evaluators import Evaluator
 from agentlab.models import EvalCase, EvalResult, Experiment, ExperimentMetrics
-from agentlab.runner import evaluate_case
+from agentlab.runner import evaluate_case, validate_evaluation_control_paths
 from agentlab.storage import RunStorage
 
 CaseExecutor = Callable[[EvalCase, AgentAdapter], EvalResult]
@@ -101,6 +101,10 @@ def run_experiment(
     selected = select_experiment_cases(cases, case_ids)
     if not selected:
         raise ValueError("An experiment requires at least one selected case.")
+    validate_evaluation_control_paths(
+        selected,
+        database_path=getattr(storage, "database_path", None),
+    )
 
     active_clock = clock or (lambda: datetime.now(timezone.utc))
     identifier = experiment_id or new_experiment_id()
@@ -167,7 +171,12 @@ def run_experiment(
     )
     storage.create_experiment(running)
     execute = case_executor or (
-        lambda case, adapter: _evaluate(case, adapter, evaluator=evaluator)
+        lambda case, adapter: _evaluate(
+            case,
+            adapter,
+            evaluator=evaluator,
+            database_path=getattr(storage, "database_path", None),
+        )
     )
     try:
         validator(selected)
@@ -195,11 +204,13 @@ def _evaluate(
     adapter: AgentAdapter,
     *,
     evaluator: Evaluator | None = None,
+    database_path: str | Path | None = None,
 ) -> EvalResult:
     result = evaluate_case(
         case,
         adapter=adapter,
         evaluator=evaluator,
+        database_path=database_path,
         suspension_supported=False,
     )
     if not isinstance(result, EvalResult):

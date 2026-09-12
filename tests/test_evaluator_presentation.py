@@ -454,11 +454,7 @@ def test_comparison_evaluator_rows_common_evaluator() -> None:
 
 def test_comparison_evaluator_rows_none_score_delta_shows_dash() -> None:
     comparison = build_comparison(
-        (
-            make_evaluator_metrics(
-                "judge", score_count=0, average_score=None
-            ),
-        ),
+        (make_evaluator_metrics("judge", score_count=0, average_score=None),),
         (make_evaluator_metrics("judge", average_score=0.9),),
     )
 
@@ -554,9 +550,7 @@ def test_evaluator_mismatch_keeps_run_level_view_data() -> None:
     assert data["baseline"]["total_runs"] == 2
     assert data["candidate"]["total_runs"] == 2
     assert data["evaluator_metrics"] == []
-    assert any(
-        "Evaluator mismatch" in warning for warning in data["warnings"]
-    )
+    assert any("Evaluator mismatch" in warning for warning in data["warnings"])
 
 
 def test_comparison_evaluator_rows_preserve_order() -> None:
@@ -610,11 +604,36 @@ def test_report_json_serializes_from_persisted_evaluator_data() -> None:
                     1,
                     "run_start",
                     _STARTED_AT,
-                    {"case_id": "case-001", "adapter": "FakeAdapter"},
+                    {
+                        "case_id": "case-001",
+                        "adapter": "FakeAdapter",
+                        "evaluator": "LLMJudgeEvaluator",
+                    },
                 ),
                 TraceEvent(
                     "smoke-run",
                     2,
+                    "pytest_before_end",
+                    _FINISHED_AT,
+                    {"status": "fail", "passed": False},
+                ),
+                TraceEvent(
+                    "smoke-run",
+                    3,
+                    "agent_end",
+                    _FINISHED_AT,
+                    {"status": "ok"},
+                ),
+                TraceEvent(
+                    "smoke-run",
+                    4,
+                    "pytest_after_end",
+                    _FINISHED_AT,
+                    {"status": "pass", "passed": True},
+                ),
+                TraceEvent(
+                    "smoke-run",
+                    5,
                     "evaluator_end",
                     _FINISHED_AT,
                     {
@@ -629,7 +648,7 @@ def test_report_json_serializes_from_persisted_evaluator_data() -> None:
                 ),
                 TraceEvent(
                     "smoke-run",
-                    3,
+                    6,
                     "run_end",
                     _FINISHED_AT,
                     {"passed": True, "elapsed_time": 1.0},

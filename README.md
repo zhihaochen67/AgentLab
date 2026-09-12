@@ -2,13 +2,13 @@
 
 Evaluation and observability platform for LLM agents.
 
-AgentLab is infrastructure for answering the questions that matter when you build on top of LLM agents: *how capable is this agent, which configuration is better, and where does it actually fail?* Instead of judging agents by their final answer alone, AgentLab runs them against reproducible task datasets in isolated workspaces and records the full execution — deterministic test results, declared-versus-actual file changes, structured traces, diagnostics, evaluator verdicts — into a normalized SQLite store that powers experiments, comparisons, reports, and a read-only dashboard.
+AgentLab is infrastructure for answering the questions that matter when you build on top of LLM agents: *how capable is this agent, which configuration is better, and where does it actually fail?* Instead of judging agents by their final answer alone, AgentLab runs them against reproducible task datasets in fresh per-run staging workspaces and records the full execution — deterministic test results, declared-versus-actual file changes, structured traces, diagnostics, evaluator verdicts — into a normalized SQLite store that powers experiments, comparisons, reports, and a read-only dashboard. A staging workspace isolates evaluated files from the source checkout; it is not an OS security sandbox.
 
 It is not a demo or a wrapper around one agent: it is an evaluation pipeline with an adapter boundary for integrating explicitly supported agent implementations, a deterministic verification gate, an optional LLM-as-Judge layer, and persistent, queryable results.
 
 ## Highlights
 
-- **Reproducible benchmarks** — YAML task datasets, isolated per-run workspaces, and a deterministic `baseline manifest → pytest before → agent → file-change contract → pytest after` gate.
+- **Reproducible benchmarks** — YAML task datasets, fresh per-run staging workspaces, and a deterministic `baseline manifest → pytest before → agent → file-change contract → pytest after` gate.
 - **Agent adapters** — a small registry (`repo_doctor`, `mock_agent`) behind one `AgentAdapter` interface, including an optional generic suspend/resume capability.
 - **Structured execution traces** — ordered, timestamped `TraceEvent`s per run with per-phase timing, diagnostics, and secret redaction.
 - **Persistent experiments** — repeated trials, per-case aggregates, success rate, latency, and failure taxonomy stored in SQLite.
@@ -24,7 +24,7 @@ It is not a demo or a wrapper around one agent: it is an evaluation pipeline wit
 Task Dataset (YAML)
         │
         ▼
-Experiment / Evaluation Runner        (fresh isolated workspace per run)
+Experiment / Evaluation Runner        (fresh staging workspace per run)
         │
         ▼
 Agent Adapter ──► Agent Under Evaluation
@@ -146,6 +146,8 @@ run_end                    PASS
 
 The bundled `repo_doctor` agent runs only from a verified Repo Doctor checkout and its checkout-local virtual environment; it never falls back to a `repo-doctor` executable or package on `PATH`. Current Repo Doctor releases are preview-only by default. AgentLab therefore refuses to start or resume Repo Doctor unless the operator explicitly passes `--repo-doctor-trusted-execution`; with that consent AgentLab invokes Repo Doctor with its required `--trusted-execution` flag. Trusted execution can run repository-defined commands as the current user inside the isolated workspace and is not an OS sandbox.
 
+Only regular, single-link files can contribute authoritative workspace evidence. AgentLab rejects symbolic links, Windows junctions/reparse points, and detectable hard links in a staged workspace rather than following them or allowing them to certify a file-change contract, final verification, or evaluator input. Hard-link rejection relies on the host filesystem reporting reliable link-count and file-identity metadata; it cannot provide that guarantee on filesystems that do not.
+
 ## Resumable Repo Doctor Evaluations
 
 Set `AGENTLAB_REPO_DOCTOR_PROJECT` to the absolute, canonical Repo Doctor checkout path. The checkout must contain its own virtual environment (`.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on POSIX). Windows development environments may omit the variable only when `D:\repo-doctor` exists; POSIX always requires explicit configuration.
@@ -219,8 +221,9 @@ Semantics worth knowing:
 ## Observability
 
 - Every run emits an ordered, sanitized trace: baseline identity, phases, statuses, elapsed time, actual/missing/unexpected file changes, and structured diagnostics for failures.
+- A PASS is persisted only when its trace contains the complete, correctly ordered deterministic-gate evidence, including a failing pytest-before run, successful agent completion, passing pytest-after run, required workspace-contract checks, and any configured evaluator outcome. FAIL traces remain available for diagnosis.
 - Sensitive fields are defensively sanitized and redacted across tracing, persistence, replay, dashboard presentation, and reporting.
-- All data lives in a single SQLite database (default `.agentlab/agentlab.db`, override with `AGENTLAB_DB_PATH`), written atomically per run and safe to open read-only.
+- All data lives in a single SQLite database (default `agentlab.db` under the platform state directory, override with `AGENTLAB_DB_PATH`), written atomically per run and safe to open read-only. The database and `AGENTLAB_STATE_ROOT` must remain outside every evaluated source repository; AgentLab rejects overlapping control paths before evaluation.
 - The dashboard's historical replay view re-renders persisted traces without re-executing anything.
 
 ## Dashboard

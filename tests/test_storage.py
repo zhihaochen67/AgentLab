@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +10,7 @@ from typer.testing import CliRunner
 
 from agentlab.cli import app
 from agentlab.models import EvalCase, EvalResult
-from agentlab.storage import SQLiteStorage, StorageError
+from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
 
 
@@ -34,16 +37,37 @@ def make_result(
         TraceEvent(
             run_id,
             2,
+            "pytest_before_end",
+            finished_at,
+            {"status": "fail", "passed": False, "returncode": 1},
+        ),
+        TraceEvent(
+            run_id,
+            3,
             "agent_end",
             finished_at,
             {"status": "ok", **(extra_data or {})},
         ),
         TraceEvent(
             run_id,
-            3,
+            4,
+            "pytest_after_end",
+            finished_at,
+            {"status": "pass" if passed else "fail", "passed": passed},
+        ),
+        TraceEvent(
+            run_id,
+            5,
             "run_end",
             finished_at,
-            {"passed": passed, "elapsed_time": latency},
+            {
+                "passed": passed,
+                "tests_before_passed": False,
+                "tests_after_passed": passed,
+                "workspace_changes_passed": True,
+                "final_status": "pass" if passed else "fail",
+                "elapsed_time": latency,
+            },
         ),
     )
     if reverse_trace:
@@ -85,12 +109,168 @@ def test_trace_events_are_saved_and_loaded_in_sequence_order() -> None:
 
         events = storage.get_trace_events("ordered-run")
 
-        assert [event.sequence for event in events] == [1, 2, 3]
+        assert [event.sequence for event in events] == [1, 2, 3, 4, 5]
         assert [event.event_type for event in events] == [
             "run_start",
+            "pytest_before_end",
             "agent_end",
+            "pytest_after_end",
             "run_end",
         ]
+
+
+def contract_backed_result(run_id: str) -> EvalResult:
+    timestamp = "2026-08-18T01:00:01+00:00"
+    events = (
+        TraceEvent(
+            run_id,
+            1,
+            "run_start",
+            timestamp,
+            {
+                "case_id": "case-001",
+                "adapter": "FakeAdapter",
+                "workspace_contract_required": True,
+                "evaluator": None,
+            },
+        ),
+        TraceEvent(
+            run_id,
+            2,
+            "pytest_before_end",
+            timestamp,
+            {"status": "fail", "passed": False},
+        ),
+        TraceEvent(run_id, 3, "workspace_baseline", timestamp, {}),
+        TraceEvent(run_id, 4, "agent_end", timestamp, {"status": "ok"}),
+        TraceEvent(
+            run_id,
+            5,
+            "workspace_verification_end",
+            timestamp,
+            {"status": "pass", "passed": True},
+        ),
+        TraceEvent(
+            run_id,
+            6,
+            "pytest_after_end",
+            timestamp,
+            {"status": "pass", "passed": True},
+        ),
+        TraceEvent(
+            run_id,
+            7,
+            "final_workspace_verification_end",
+            timestamp,
+            {"status": "pass", "passed": True, "contract_passed": True},
+        ),
+        TraceEvent(
+            run_id,
+            8,
+            "run_end",
+            timestamp,
+            {
+                "passed": True,
+                "tests_before_passed": False,
+                "tests_after_passed": True,
+                "workspace_changes_passed": True,
+                "final_status": "pass",
+                "elapsed_time": 1.0,
+            },
+        ),
+    )
+    return EvalResult(
+        case_id="case-001",
+        passed=True,
+        tests_before_passed=False,
+        tests_after_passed=True,
+        run_id=run_id,
+        trace=events,
+    )
+
+
+def without_event(result: EvalResult, event_type: str) -> EvalResult:
+    events = tuple(
+        replace(event, sequence=sequence)
+        for sequence, event in enumerate(
+            (event for event in result.trace if event.event_type != event_type),
+            start=1,
+        )
+    )
+    return replace(result, trace=events)
+
+
+def test_storage_rejects_pass_with_only_run_boundaries(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+    result = make_result("boundary-only")
+    result = replace(
+        result,
+        trace=(result.trace[0], replace(result.trace[-1], sequence=2)),
+    )
+
+    with pytest.raises(ValueError, match="pytest_before_end"):
+        storage.save_run(result, "dataset.yaml")
+
+
+def test_storage_rejects_pass_missing_pytest_before(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+
+    with pytest.raises(ValueError, match="pytest_before_end"):
+        storage.save_run(
+            without_event(make_result("missing-before"), "pytest_before_end"),
+            "dataset.yaml",
+        )
+
+
+def test_storage_rejects_contract_pass_missing_final_verification(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+
+    with pytest.raises(ValueError, match="final_workspace_verification_end"):
+        storage.save_run(
+            without_event(
+                contract_backed_result("missing-final"),
+                "final_workspace_verification_end",
+            ),
+            "dataset.yaml",
+        )
+
+
+def test_storage_rejects_configured_evaluator_without_evidence(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+    result = make_result("missing-evaluator")
+    start = replace(
+        result.trace[0],
+        data={**result.trace[0].data, "evaluator": "FakeEvaluator"},
+    )
+
+    with pytest.raises(ValueError, match="evaluator_end"):
+        storage.save_run(
+            replace(result, trace=(start, *result.trace[1:])),
+            "dataset.yaml",
+        )
+
+
+def test_complete_contract_pass_persists_and_replays(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+    result = contract_backed_result("complete-pass")
+
+    storage.save_run(result, "dataset.yaml")
+
+    assert storage.get_run(result.run_id).status == "PASS"
+    assert storage.get_trace_events(result.run_id) == result.trace
+
+
+def test_ordinary_fail_trace_still_persists(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "agentlab.db")
+    result = make_result("ordinary-fail", passed=False, error="tests failed")
+
+    storage.save_run(result, "dataset.yaml")
+
+    assert storage.get_run(result.run_id).status == "FAIL"
 
 
 def test_missing_run_id_returns_no_data() -> None:
@@ -99,6 +279,43 @@ def test_missing_run_id_returns_no_data() -> None:
 
         assert storage.get_run("missing") is None
         assert storage.get_trace_events("missing") == ()
+
+
+def test_default_database_path_uses_external_state_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_root = (tmp_path / "state").resolve()
+    monkeypatch.delenv("AGENTLAB_DB_PATH", raising=False)
+    monkeypatch.setenv("AGENTLAB_STATE_ROOT", str(state_root))
+
+    assert default_database_path() == state_root / "agentlab.db"
+
+
+def test_storage_imports_independently_in_fresh_interpreter(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment.pop("AGENTLAB_DB_PATH", None)
+    state_root = (tmp_path / "state").resolve()
+    environment["AGENTLAB_STATE_ROOT"] = str(state_root)
+    script = (
+        "import sys; "
+        "assert 'agentlab.storage' not in sys.modules; "
+        "from agentlab.storage import default_database_path; "
+        "assert 'agentlab.execution_sessions' not in sys.modules; "
+        "print(default_database_path())"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert Path(completed.stdout.strip()) == state_root / "agentlab.db"
 
 
 def test_multiple_runs_are_listed_most_recent_first() -> None:
@@ -187,11 +404,10 @@ def test_idempotent_run_persistence_accepts_exact_replay_and_rejects_conflict() 
         result = replace(
             result,
             trace=(
-                result.trace[0],
-                result.trace[1],
+                *result.trace[:-1],
                 TraceEvent(
                     result.run_id,
-                    3,
+                    len(result.trace),
                     "evaluator_end",
                     result.trace[-1].timestamp,
                     {
@@ -204,7 +420,7 @@ def test_idempotent_run_persistence_accepts_exact_replay_and_rejects_conflict() 
                         "elapsed_time": 0.1,
                     },
                 ),
-                replace(result.trace[-1], sequence=4),
+                replace(result.trace[-1], sequence=len(result.trace) + 1),
             ),
         )
 
@@ -212,12 +428,9 @@ def test_idempotent_run_persistence_accepts_exact_replay_and_rejects_conflict() 
         storage.save_run_idempotently(result, "dataset.yaml")
 
         assert [run.run_id for run in storage.list_runs()] == ["finalizing-run"]
-        assert [event.sequence for event in storage.get_trace_events("finalizing-run")] == [
-            1,
-            2,
-            3,
-            4,
-        ]
+        assert [
+            event.sequence for event in storage.get_trace_events("finalizing-run")
+        ] == [1, 2, 3, 4, 5, 6]
         assert len(storage.get_evaluator_outcomes("finalizing-run")) == 1
         with pytest.raises(StorageError, match="conflicts"):
             storage.save_run_idempotently(result, "different-dataset.yaml")

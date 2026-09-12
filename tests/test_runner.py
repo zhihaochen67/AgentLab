@@ -115,6 +115,85 @@ def test_workspace_is_an_isolated_copy() -> None:
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_database_path_inside_source_is_rejected_before_evaluation(
+    tmp_path: Path,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    adapter = FixingAdapter()
+
+    with pytest.raises(ValueError, match="database path must remain outside"):
+        evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=adapter,
+            database_path=repository / ".agentlab" / "agentlab.db",
+            state_root=tmp_path / "state",
+        )
+
+    assert adapter.calls == []
+    assert not (repository / ".agentlab").exists()
+
+
+def test_state_root_inside_source_is_rejected_before_evaluation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    state_root = repository / ".agentlab-state"
+    monkeypatch.setenv("AGENTLAB_STATE_ROOT", str(state_root.resolve()))
+
+    with pytest.raises(ValueError, match="state root must remain outside"):
+        evaluate_case(
+            EvalCase("addition", str(repository), "Fix addition"),
+            adapter=FixingAdapter(),
+            database_path=tmp_path / "agentlab.db",
+        )
+
+    assert not state_root.exists()
+
+
+def test_external_database_and_state_roots_remain_supported(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    outcomes = iter(
+        (
+            PytestRunResult(False, 1, "", ""),
+            PytestRunResult(True, 0, "", ""),
+        )
+    )
+    monkeypatch.setattr("agentlab.runner.run_pytest", lambda _workspace: next(outcomes))
+
+    result = evaluate_case(
+        EvalCase(
+            "addition",
+            str(repository),
+            "Fix addition",
+            {"modified_files": ["calculator.py"]},
+        ),
+        adapter=FixingAdapter(),
+        database_path=tmp_path / "control" / "agentlab.db",
+        state_root=tmp_path / "state",
+    )
+
+    assert result.passed is True
+
+
+def test_agentlab_metadata_directory_is_excluded_from_workspace_copy(
+    tmp_path: Path,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+    metadata = repository / ".agentlab"
+    metadata.mkdir()
+    (metadata / "agentlab.db").write_bytes(b"prior run history")
+
+    workspace = create_workspace(str(repository))
+    try:
+        assert not (workspace / ".agentlab").exists()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def test_directory_symlink_is_rejected_before_workspace_copy(
     tmp_path: Path,
     monkeypatch,
@@ -150,7 +229,10 @@ def test_regular_file_symlink_copy_and_manifest_semantics_are_consistent(
     link = repository / "linked.py"
     _symlink_or_skip(link, target, target_is_directory=False)
 
-    source_manifest = workspace_manifest(repository)
+    source_manifest = workspace_manifest(
+        repository,
+        allow_source_file_symlinks=True,
+    )
     workspace = create_workspace(str(repository))
     try:
         assert not (workspace / "linked.py").is_symlink()
@@ -158,6 +240,79 @@ def test_regular_file_symlink_copy_and_manifest_semantics_are_consistent(
         assert workspace_manifest(workspace) == source_manifest
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_authoritative_manifest_rejects_external_file_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external.py"
+    external.write_text("VALUE = 2\n", encoding="utf-8")
+    link = workspace / "linked.py"
+    _symlink_or_skip(link, external, target_is_directory=False)
+
+    with pytest.raises(
+        UnsupportedWorkspaceSymlinkError,
+        match="symbolic links are unsupported.*linked.py",
+    ):
+        workspace_manifest(workspace)
+
+
+def test_authoritative_manifest_rejects_hard_link(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external.py"
+    external.write_text("VALUE = 2\n", encoding="utf-8")
+    linked = workspace / "linked.py"
+    try:
+        os.link(external, linked)
+    except OSError as error:
+        pytest.skip(f"hard links are unavailable: {error}")
+
+    with pytest.raises(
+        UnsupportedWorkspaceSymlinkError,
+        match="hard-linked files are unsupported.*linked.py",
+    ):
+        workspace_manifest(workspace)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_authoritative_manifest_rejects_windows_junction(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "value.py").write_text("VALUE = 2\n", encoding="utf-8")
+    junction = workspace / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"junction creation is unavailable: {result.stderr}")
+
+    with pytest.raises(
+        UnsupportedWorkspaceSymlinkError,
+        match="reparse points.*junction",
+    ):
+        workspace_manifest(workspace)
+
+
+def test_authoritative_manifest_accepts_ordinary_regular_files(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    manifest = workspace_manifest(workspace)
+
+    assert tuple(manifest) == ("module.py",)
 
 
 def _symlink_or_skip(
@@ -253,6 +408,70 @@ def test_declared_workspace_change_contract_is_enforced() -> None:
         "elapsed_time": verification.data["elapsed_time"],
     }
     assert result.trace[-1].data["failure_reason"] == "workspace_contract_failed"
+
+
+def test_agent_created_symlink_on_expected_path_fails_before_post_tests(
+    tmp_path: Path,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+
+    class ExpectedLinkAdapter(AgentAdapter):
+        def repair(self, workspace: Path, task: str) -> AgentRunResult:
+            replacement = workspace / "replacement.py"
+            replacement.write_text(
+                "def add(left, right):\n    return left + right\n",
+                encoding="utf-8",
+            )
+            expected = workspace / "calculator.py"
+            expected.unlink()
+            _symlink_or_skip(expected, replacement, target_is_directory=False)
+            return AgentRunResult(0)
+
+    result = evaluate_case(
+        EvalCase(
+            "addition",
+            str(repository),
+            "Fix addition",
+            {"modified_files": ["calculator.py"]},
+        ),
+        adapter=ExpectedLinkAdapter(),
+    )
+
+    assert result.passed is False
+    assert result.tests_after_passed is False
+    assert "symbolic links are unsupported" in result.error
+    assert result.trace[-1].data["failure_reason"] == ("workspace_verification_error")
+
+
+def test_agent_created_symlink_on_unexpected_path_fails_before_post_tests(
+    tmp_path: Path,
+) -> None:
+    repository = make_failing_repository(tmp_path)
+
+    class UnexpectedLinkAdapter(FixingAdapter):
+        def repair(self, workspace: Path, task: str) -> AgentRunResult:
+            result = super().repair(workspace, task)
+            _symlink_or_skip(
+                workspace / "unexpected.py",
+                workspace / "calculator.py",
+                target_is_directory=False,
+            )
+            return result
+
+    result = evaluate_case(
+        EvalCase(
+            "addition",
+            str(repository),
+            "Fix addition",
+            {"modified_files": ["calculator.py"]},
+        ),
+        adapter=UnexpectedLinkAdapter(),
+    )
+
+    assert result.passed is False
+    assert result.tests_after_passed is False
+    assert "symbolic links are unsupported" in result.error
+    assert "unexpected.py" in result.error
 
 
 def test_declared_workspace_change_contract_passes_exact_repair() -> None:

@@ -15,11 +15,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from agentlab import platform_paths
 from agentlab.adapters.base import AgentResumeHandle
 from agentlab.models import EvalCase
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
-STATE_ROOT_ENV = "AGENTLAB_STATE_ROOT"
+STATE_ROOT_ENV = platform_paths.STATE_ROOT_ENV
 SESSION_SCHEMA_VERSION = 4
 MAX_EXECUTION_SESSION_BYTES = 1_000_000
 MAX_CASE_EXPECTED_ITEMS = 200
@@ -89,25 +90,18 @@ class ExecutionSession:
 
 def default_state_root() -> Path:
     """Return a cross-platform state directory outside evaluation workspaces."""
-    configured = os.environ.get(STATE_ROOT_ENV)
-    if configured:
-        path = Path(configured).expanduser()
-        if not path.is_absolute():
-            raise ExecutionSessionError(f"{STATE_ROOT_ENV} must be an absolute path.")
-        return path.resolve(strict=False)
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA")
-        if base:
-            return (Path(base) / "AgentLab" / "State").resolve(strict=False)
-    xdg = os.environ.get("XDG_STATE_HOME")
-    if xdg:
-        return (Path(xdg).expanduser() / "agentlab").resolve(strict=False)
-    return (Path.home() / ".local" / "state" / "agentlab").resolve(strict=False)
+    try:
+        return platform_paths.default_state_root()
+    except platform_paths.StateRootConfigurationError as error:
+        raise ExecutionSessionError(str(error)) from error
 
 
 def repo_doctor_state_root(root: Path | None = None) -> Path:
     """Return the fixed AgentLab-managed Repo Doctor state root."""
-    return _state_root(root) / "repo-doctor"
+    try:
+        return platform_paths.repo_doctor_state_root(root)
+    except platform_paths.StateRootConfigurationError as error:
+        raise ExecutionSessionError(str(error)) from error
 
 
 def new_execution_id() -> str:

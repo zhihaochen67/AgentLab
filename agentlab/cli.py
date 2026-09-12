@@ -32,7 +32,11 @@ from agentlab.models import (
     ExperimentMetrics,
 )
 from agentlab.reporting import build_experiment_report
-from agentlab.runner import evaluate_case, resume_evaluation
+from agentlab.runner import (
+    evaluate_case,
+    resume_evaluation,
+    validate_evaluation_control_paths,
+)
 from agentlab.storage import SQLiteStorage, StorageError, default_database_path
 from agentlab.tracer import TraceEvent
 
@@ -131,6 +135,7 @@ def run_eval(
         )
         selected_adapter.preflight()
         cases = load_dataset(dataset)
+        validate_evaluation_control_paths(cases)
         storage = _open_storage()
     except (
         AgentPreflightError,
@@ -472,6 +477,7 @@ def run_experiment_command(
     effective_prompt_variant = prompt_variant or DEFAULT_PROMPT_VARIANT
     try:
         cases = load_dataset(dataset, validate_initial_state=False)
+        validate_evaluation_control_paths(cases)
         storage = _open_storage()
         selected_adapter = create_default_registry().create(
             agent,
@@ -571,6 +577,7 @@ def run_benchmark(
 
     try:
         cases = load_dataset(dataset, validate_initial_state=False)
+        validate_evaluation_control_paths(cases)
         storage = _open_storage()
         selected_adapter = create_default_registry().create(
             agent,

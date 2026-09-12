@@ -28,7 +28,7 @@ from agentlab.diagnostics import (
     AgentFailureType,
     diagnose_repo_doctor_report,
 )
-from agentlab.execution_sessions import repo_doctor_state_root
+from agentlab.platform_paths import repo_doctor_state_root
 from agentlab.providers import is_plausible_api_key
 from agentlab.subprocesses import run_process
 from agentlab.tracer import summarize_text

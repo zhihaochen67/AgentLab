@@ -86,13 +86,27 @@ def make_result(
         TraceEvent(
             run_id,
             2,
+            "pytest_before_end",
+            "2026-08-19T01:00:01+00:00",
+            {"status": "fail", "passed": False},
+        ),
+        TraceEvent(
+            run_id,
+            3,
             "agent_end",
             "2026-08-19T01:00:01+00:00",
             agent_data,
         ),
         TraceEvent(
             run_id,
-            3,
+            4,
+            "pytest_after_end",
+            "2026-08-19T01:00:02+00:00",
+            {"status": "pass" if passed else "fail", "passed": passed},
+        ),
+        TraceEvent(
+            run_id,
+            5,
             "run_end",
             "2026-08-19T01:00:02+00:00",
             {"passed": passed, "elapsed_time": latency},

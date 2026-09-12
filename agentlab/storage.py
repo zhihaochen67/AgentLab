@@ -21,9 +21,10 @@ from agentlab.models import (
     Experiment,
     ExperimentMetrics,
 )
+from agentlab.platform_paths import default_state_root
 from agentlab.tracer import TraceEvent, sanitize_data, summarize_text
 
-DEFAULT_DATABASE_PATH = Path(".agentlab") / "agentlab.db"
+DEFAULT_DATABASE_PATH = Path("agentlab.db")
 DATABASE_PATH_ENV = "AGENTLAB_DB_PATH"
 
 
@@ -221,11 +222,11 @@ class RunStorage(ABC):
 
 
 def default_database_path() -> Path:
-    """Return the configured database path, defaulting to the current project."""
+    """Return the configured database path outside evaluated repositories."""
     configured = os.environ.get(DATABASE_PATH_ENV)
     if configured:
-        return Path(configured).expanduser()
-    return Path.cwd() / DEFAULT_DATABASE_PATH
+        return Path(configured).expanduser().resolve(strict=False)
+    return default_state_root() / DEFAULT_DATABASE_PATH
 
 
 class SQLiteStorage(RunStorage):
@@ -237,12 +238,16 @@ class SQLiteStorage(RunStorage):
         try:
             if read_only:
                 if not self.database_path.is_file():
-                    raise StorageError(f"AgentLab database does not exist: {self.database_path}")
+                    raise StorageError(
+                        f"AgentLab database does not exist: {self.database_path}"
+                    )
             else:
                 self.database_path.parent.mkdir(parents=True, exist_ok=True)
                 self._initialize_schema()
         except (OSError, sqlite3.Error) as error:
-            raise StorageError(f"Could not initialize AgentLab database: {error}") from error
+            raise StorageError(
+                f"Could not initialize AgentLab database: {error}"
+            ) from error
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
@@ -364,7 +369,8 @@ class SQLiteStorage(RunStorage):
     @staticmethod
     def _migrate_runs_schema(connection: sqlite3.Connection) -> None:
         columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(runs)").fetchall()
         }
         if "experiment_id" not in columns:
             connection.execute(
@@ -390,9 +396,14 @@ class SQLiteStorage(RunStorage):
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"EvalResult.{name} must be a boolean.")
-        if result.passed and (not result.tests_after_passed or result.error is not None):
+        if result.passed and (
+            result.tests_before_passed
+            or not result.tests_after_passed
+            or result.error is not None
+        ):
             raise ValueError(
-                "A passing EvalResult requires passing post-tests and no error."
+                "A passing EvalResult requires a failing repair baseline, passing "
+                "post-tests, and no error."
             )
 
         ordered = tuple(sorted(result.trace, key=lambda event: event.sequence))
@@ -460,8 +471,131 @@ class SQLiteStorage(RunStorage):
             or not math.isfinite(float(total_latency))
             or total_latency < 0
         ):
-            raise ValueError("run_end elapsed_time must be a finite non-negative number.")
+            raise ValueError(
+                "run_end elapsed_time must be a finite non-negative number."
+            )
+        if result.passed:
+            cls._validate_passing_trace(start, end, ordered)
         return start, end, ordered, float(total_latency)
+
+    @classmethod
+    def _validate_passing_trace(
+        cls,
+        start: TraceEvent,
+        end: TraceEvent,
+        ordered: tuple[TraceEvent, ...],
+    ) -> None:
+        """Require self-contained deterministic-gate evidence for persisted PASS."""
+
+        def one(event_type: str) -> TraceEvent:
+            matches = tuple(
+                event for event in ordered if event.event_type == event_type
+            )
+            if len(matches) != 1:
+                raise ValueError(
+                    f"A passing trace requires exactly one {event_type} event."
+                )
+            return matches[0]
+
+        before = one("pytest_before_end")
+        agent = one("agent_end")
+        after = one("pytest_after_end")
+        if before.data.get("passed") is not False or before.data.get("status") not in {
+            None,
+            "fail",
+        }:
+            raise ValueError(
+                "A passing trace requires pytest-before evidence showing failure."
+            )
+        if agent.data.get("status") != "ok":
+            raise ValueError(
+                "A passing trace requires successful agent completion evidence."
+            )
+        if after.data.get("passed") is not True or after.data.get("status") not in {
+            None,
+            "pass",
+        }:
+            raise ValueError(
+                "A passing trace requires pytest-after evidence showing success."
+            )
+
+        contract_marker = start.data.get("workspace_contract_required")
+        if contract_marker is not None and not isinstance(contract_marker, bool):
+            raise TypeError("run_start workspace_contract_required must be a boolean.")
+        contract_event_types = {
+            "workspace_baseline",
+            "workspace_verification_end",
+            "final_workspace_verification_end",
+        }
+        observed_contract = any(
+            event.event_type in contract_event_types for event in ordered
+        )
+        if contract_marker is False and observed_contract:
+            raise ValueError(
+                "run_start contradicts the trace's workspace-contract evidence."
+            )
+        contract_required = contract_marker is True or observed_contract
+
+        phase_order = [before.sequence]
+        if contract_required:
+            baseline = one("workspace_baseline")
+            workspace = one("workspace_verification_end")
+            final_workspace = one("final_workspace_verification_end")
+            if workspace.data.get("passed") is not True or workspace.data.get(
+                "status"
+            ) not in {None, "pass"}:
+                raise ValueError(
+                    "A passing trace requires successful workspace-contract evidence."
+                )
+            if (
+                final_workspace.data.get("passed") is not True
+                or final_workspace.data.get("contract_passed") is not True
+                or final_workspace.data.get("status") not in {None, "pass"}
+            ):
+                raise ValueError(
+                    "A passing trace requires successful final workspace verification."
+                )
+            phase_order.extend((baseline.sequence, agent.sequence, workspace.sequence))
+        else:
+            phase_order.append(agent.sequence)
+        phase_order.append(after.sequence)
+        if contract_required:
+            phase_order.append(final_workspace.sequence)
+
+        evaluator_name = start.data.get("evaluator")
+        if evaluator_name is not None and (
+            not isinstance(evaluator_name, str) or not evaluator_name.strip()
+        ):
+            raise ValueError("run_start evaluator must be non-empty text or null.")
+        evaluator_events = tuple(
+            event for event in ordered if event.event_type == "evaluator_end"
+        )
+        evaluator_rows = tuple(
+            cls._validated_evaluator_outcome_row(start.run_id, event)
+            for event in evaluator_events
+        )
+        evaluator_required = evaluator_name is not None or bool(evaluator_events)
+        if evaluator_required:
+            if evaluator_name is not None:
+                evaluator = one("evaluator_end")
+                if evaluator.data.get("evaluator") != evaluator_name:
+                    raise ValueError(
+                        "run_start evaluator does not match evaluator completion "
+                        "evidence."
+                    )
+            if any(row[3] != "PASS" or row[4] != 1 for row in evaluator_rows):
+                raise ValueError(
+                    "A passing trace requires successful evaluator evidence."
+                )
+            phase_order.extend(event.sequence for event in evaluator_events)
+
+        phase_order.extend((end.sequence,))
+        if phase_order != sorted(phase_order) or len(set(phase_order)) != len(
+            phase_order
+        ):
+            raise ValueError(
+                "A passing trace has deterministic-gate phases out of order."
+            )
 
     _EVALUATOR_STATUSES = frozenset({"pass", "fail", "error"})
 
@@ -560,7 +694,9 @@ class SQLiteStorage(RunStorage):
                 allow_nan=False,
             )
         except (TypeError, ValueError) as error:
-            raise ValueError(f"{context} metadata is not JSON-serializable: {error}") from error
+            raise ValueError(
+                f"{context} metadata is not JSON-serializable: {error}"
+            ) from error
 
         return (
             run_id,
@@ -577,7 +713,9 @@ class SQLiteStorage(RunStorage):
 
     def save_run(self, result: EvalResult, dataset: str) -> None:
         if self.read_only:
-            raise StorageError("Cannot save an evaluation run through read-only storage.")
+            raise StorageError(
+                "Cannot save an evaluation run through read-only storage."
+            )
         start, end, ordered_events, total_latency = self._validated_trace(result)
         if (result.experiment_id is None) != (result.trial_index is None):
             raise ValueError("experiment_id and trial_index must be set together.")
@@ -663,7 +801,9 @@ class SQLiteStorage(RunStorage):
                             f"Unknown experiment: {result.experiment_id}"
                         )
         except sqlite3.Error as error:
-            raise StorageError(f"Could not save evaluation run {result.run_id}: {error}") from error
+            raise StorageError(
+                f"Could not save evaluation run {result.run_id}: {error}"
+            ) from error
 
     def save_run_idempotently(self, result: EvalResult, dataset: str) -> None:
         """Persist one run once, accepting only an exact committed replay."""
@@ -679,9 +819,7 @@ class SQLiteStorage(RunStorage):
             total_latency=total_latency,
             tests_before_passed=result.tests_before_passed,
             tests_after_passed=result.tests_after_passed,
-            error=(
-                summarize_text(result.error) if result.error is not None else None
-            ),
+            error=(summarize_text(result.error) if result.error is not None else None),
             experiment_id=result.experiment_id,
             trial_index=result.trial_index,
         )
@@ -739,7 +877,9 @@ class SQLiteStorage(RunStorage):
                     (run_id,),
                 ).fetchone()
         except sqlite3.Error as error:
-            raise StorageError(f"Could not load evaluation run {run_id}: {error}") from error
+            raise StorageError(
+                f"Could not load evaluation run {run_id}: {error}"
+            ) from error
         return self._stored_run(row) if row is not None else None
 
     def get_trace_events(self, run_id: str) -> tuple[TraceEvent, ...]:
@@ -755,7 +895,9 @@ class SQLiteStorage(RunStorage):
                     (run_id,),
                 ).fetchall()
         except sqlite3.Error as error:
-            raise StorageError(f"Could not load trace for run {run_id}: {error}") from error
+            raise StorageError(
+                f"Could not load trace for run {run_id}: {error}"
+            ) from error
         try:
             return tuple(
                 TraceEvent(
@@ -768,7 +910,9 @@ class SQLiteStorage(RunStorage):
                 for row in rows
             )
         except (TypeError, json.JSONDecodeError) as error:
-            raise StorageError(f"Stored trace for run {run_id} is invalid: {error}") from error
+            raise StorageError(
+                f"Stored trace for run {run_id} is invalid: {error}"
+            ) from error
 
     def get_evaluator_outcomes(self, run_id: str) -> tuple[StoredEvaluatorOutcome, ...]:
         try:
@@ -809,9 +953,7 @@ class SQLiteStorage(RunStorage):
                     evaluator=row["evaluator"],
                     status=row["status"],
                     passed=bool(row["passed"]),
-                    score=(
-                        float(row["score"]) if row["score"] is not None else None
-                    ),
+                    score=(float(row["score"]) if row["score"] is not None else None),
                     feedback=row["feedback"],
                     metadata=metadata,
                     error_type=row["error_type"],
@@ -893,7 +1035,9 @@ class SQLiteStorage(RunStorage):
                     "SELECT DISTINCT case_id FROM runs ORDER BY case_id"
                 ).fetchall()
         except sqlite3.Error as error:
-            raise StorageError(f"Could not list evaluation case ids: {error}") from error
+            raise StorageError(
+                f"Could not list evaluation case ids: {error}"
+            ) from error
         return tuple(row["case_id"] for row in rows)
 
     def get_stats(self) -> RunStats:
@@ -912,7 +1056,9 @@ class SQLiteStorage(RunStorage):
                     """
                 ).fetchone()
         except sqlite3.Error as error:
-            raise StorageError(f"Could not load evaluation statistics: {error}") from error
+            raise StorageError(
+                f"Could not load evaluation statistics: {error}"
+            ) from error
         total_runs = int(row["total_runs"])
         successful_runs = int(row["successful_runs"])
         return RunStats(
@@ -1013,7 +1159,9 @@ class SQLiteStorage(RunStorage):
                     (experiment_id,),
                 ).fetchone()
         except sqlite3.Error as error:
-            raise StorageError(f"Could not load experiment {experiment_id}: {error}") from error
+            raise StorageError(
+                f"Could not load experiment {experiment_id}: {error}"
+            ) from error
         return self._experiment(row) if row is not None else None
 
     def list_experiments(self, limit: int = 20) -> tuple[Experiment, ...]:
@@ -1167,7 +1315,9 @@ class SQLiteStorage(RunStorage):
             tests_before_passed=bool(row["tests_before_passed"]),
             tests_after_passed=bool(row["tests_after_passed"]),
             error=row["error"],
-            experiment_id=(row["experiment_id"] if "experiment_id" in columns else None),
+            experiment_id=(
+                row["experiment_id"] if "experiment_id" in columns else None
+            ),
             trial_index=(row["trial_index"] if "trial_index" in columns else None),
         )
 

@@ -74,7 +74,9 @@ def test_invalid_duplicate_and_missing_sequences_are_non_fatal() -> None:
     assert [item.sequence for item in replay.events] == [1, 3]
     assert any("duplicate sequence 1" in warning for warning in replay.warnings)
     assert any("invalid sequence 0" in warning for warning in replay.warnings)
-    assert any("invalid sequence 'not-a-number'" in warning for warning in replay.warnings)
+    assert any(
+        "invalid sequence 'not-a-number'" in warning for warning in replay.warnings
+    )
     assert any("Missing sequence 2" in warning for warning in replay.warnings)
 
 
@@ -166,7 +168,18 @@ def test_replay_reads_sqlite_without_writing() -> None:
         writable = SQLiteStorage(database)
         trace = (
             event(1, "run_start", {"adapter": "FakeAdapter"}),
-            event(2, "run_end", {"passed": True, "elapsed_time": 1.0}),
+            event(
+                2,
+                "pytest_before_end",
+                {"status": "fail", "passed": False},
+            ),
+            event(3, "agent_end", {"status": "ok"}),
+            event(
+                4,
+                "pytest_after_end",
+                {"status": "pass", "passed": True},
+            ),
+            event(5, "run_end", {"passed": True, "elapsed_time": 1.0}),
         )
         writable.save_run(
             EvalResult(

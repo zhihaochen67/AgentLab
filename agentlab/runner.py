@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from agentlab.execution_sessions import (
     ExecutionSession,
     ExecutionSessionError,
     ExecutionStatus,
+    default_state_root,
     execution_session_lock,
     load_active_execution_session,
     new_execution_id,
@@ -83,7 +85,9 @@ class FinalWorkspaceVerificationResult:
 
 
 PYTEST_TIMEOUT_SECONDS = 120
-_IGNORED_WORKSPACE_DIRECTORIES = frozenset({".git", ".pytest_cache", "__pycache__"})
+_IGNORED_WORKSPACE_DIRECTORIES = frozenset(
+    {".agentlab", ".git", ".pytest_cache", "__pycache__"}
+)
 _IGNORED_WORKSPACE_FILES = frozenset({WORKSPACE_MARKER})
 _MAX_TRACE_PATHS = 200
 
@@ -96,7 +100,7 @@ def create_workspace(repository: str) -> Path:
             source,
             temp_dir,
             dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(".git"),
+            ignore=shutil.ignore_patterns(".agentlab", ".git"),
         )
         (temp_dir / WORKSPACE_MARKER).write_text(
             "AgentLab temporary evaluation workspace.\n",
@@ -108,8 +112,12 @@ def create_workspace(repository: str) -> Path:
     return temp_dir.resolve(strict=True)
 
 
-def workspace_manifest(workspace: str | Path) -> dict[str, str]:
-    """Hash material workspace files in stable relative-path order."""
+def workspace_manifest(
+    workspace: str | Path,
+    *,
+    allow_source_file_symlinks: bool = False,
+) -> dict[str, str]:
+    """Hash regular, workspace-owned files in stable relative-path order."""
     root = validate_workspace_symlinks(workspace)
     manifest: dict[str, str] = {}
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
@@ -118,22 +126,100 @@ def workspace_manifest(workspace: str | Path) -> dict[str, str]:
             continue
         if relative.as_posix() in _IGNORED_WORKSPACE_FILES:
             continue
-        if not path.is_file():
+        if path.is_symlink():
+            if not allow_source_file_symlinks:
+                raise UnsupportedWorkspaceSymlinkError(
+                    "symbolic links are unsupported in authoritative workspace "
+                    f"evidence: {relative.as_posix()}"
+                )
+            if not path.is_file():
+                raise UnsupportedWorkspaceSymlinkError(
+                    f"source file symlink target is unavailable: {relative.as_posix()}"
+                )
+            file_info = path.stat()
+        else:
+            file_info = path.lstat()
+        if _is_reparse_point(file_info):
+            raise UnsupportedWorkspaceSymlinkError(
+                "reparse points are unsupported in authoritative workspace "
+                f"evidence: {relative.as_posix()}"
+            )
+        if not stat.S_ISREG(file_info.st_mode):
             continue
+        if not allow_source_file_symlinks and file_info.st_nlink > 1:
+            raise UnsupportedWorkspaceSymlinkError(
+                "hard-linked files are unsupported in authoritative workspace "
+                f"evidence: {relative.as_posix()}"
+            )
         digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if not allow_source_file_symlinks:
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened_info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened_info.st_mode)
+                or _is_reparse_point(opened_info)
+                or (not allow_source_file_symlinks and opened_info.st_nlink > 1)
+                or (opened_info.st_dev, opened_info.st_ino)
+                != (file_info.st_dev, file_info.st_ino)
+            ):
+                raise UnsupportedWorkspaceSymlinkError(
+                    "workspace file identity changed while evidence was collected: "
+                    f"{relative.as_posix()}"
+                )
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         manifest[relative.as_posix()] = digest.hexdigest()
     return manifest
+
+
+def _is_reparse_point(file_info: os.stat_result) -> bool:
+    attributes = getattr(file_info, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
+def validate_evaluation_control_paths(
+    cases: Sequence[EvalCase],
+    *,
+    database_path: str | Path | None = None,
+    state_root: Path | None = None,
+) -> None:
+    """Reject AgentLab-owned persistent paths nested in evaluated sources."""
+    database = (
+        Path(database_path or default_database_path())
+        .expanduser()
+        .resolve(strict=False)
+    )
+    state = Path(state_root or default_state_root()).expanduser().resolve(strict=False)
+    for case in cases:
+        source = Path(case.repository).expanduser().resolve(strict=False)
+        for label, control_path in (
+            ("database path", database),
+            ("state root", state),
+        ):
+            if control_path == source or source in control_path.parents:
+                raise ValueError(
+                    f"AgentLab {label} must remain outside evaluated source "
+                    f"repository: {source}"
+                )
 
 
 def validate_workspace_symlinks(workspace: str | Path) -> Path:
     """Reject directory and non-file symlinks before copy or manifest use."""
     candidate = Path(workspace)
-    if candidate.is_symlink() and candidate.is_dir():
+    candidate_info = candidate.lstat()
+    if candidate.is_symlink() or _is_reparse_point(candidate_info):
         raise UnsupportedWorkspaceSymlinkError(
-            "directory symlinks are unsupported in AgentLab workspaces: ."
+            "workspace-root symlinks and reparse points are unsupported in "
+            "AgentLab workspaces: ."
         )
     root = candidate.resolve(strict=True)
     if not root.is_dir():
@@ -150,10 +236,12 @@ def validate_workspace_symlinks(workspace: str | Path) -> Path:
         directory = Path(current)
         for name in sorted(directories):
             path = directory / name
-            if path.is_symlink():
+            file_info = path.lstat()
+            if path.is_symlink() or _is_reparse_point(file_info):
                 relative = path.relative_to(root).as_posix()
                 raise UnsupportedWorkspaceSymlinkError(
-                    "directory symlinks are unsupported in AgentLab workspaces: "
+                    "directory symlinks are unsupported in AgentLab workspaces; "
+                    "directory reparse points are also unsupported: "
                     f"{relative}"
                 )
         for name in sorted(files):
@@ -677,6 +765,11 @@ def evaluate_case(
     suspension_supported: bool = True,
 ) -> EvalResult | EvaluationSuspended:
     """Evaluate once, returning a non-final control object if the agent suspends."""
+    validate_evaluation_control_paths(
+        (case,),
+        database_path=database_path,
+        state_root=state_root,
+    )
     active_tracer = tracer or Tracer()
     active_adapter = adapter or RepoDoctorAdapter()
     workspace: Path | None = None
@@ -698,6 +791,10 @@ def evaluate_case(
         repository=case.repository,
         adapter=type(active_adapter).__name__,
         adapter_identity=active_adapter.info.name,
+        workspace_contract_required=(
+            isinstance(case.expected, dict) and "modified_files" in case.expected
+        ),
+        evaluator=(type(evaluator).__name__ if evaluator is not None else None),
     )
     try:
         expected_files = _expected_modified_files(case)
@@ -725,9 +822,10 @@ def evaluate_case(
                 )
             phase = "agent"
             _run_traced_agent(active_adapter, workspace, case.task, active_tracer)
+            phase = "workspace_verification"
+            current_post_agent = workspace_manifest(workspace)
             if pre_agent_manifest is not None and expected_files is not None:
-                post_agent_manifest = workspace_manifest(workspace)
-                phase = "workspace_verification"
+                post_agent_manifest = current_post_agent
                 changes = _run_traced_workspace_verification(
                     pre_agent_manifest,
                     post_agent_manifest,
@@ -741,16 +839,17 @@ def evaluate_case(
             phase = "pytest_after"
             after_result = _run_traced_pytest(workspace, active_tracer, phase)
             after_passed = after_result.passed
+            phase = "final_workspace_verification"
+            final_manifest = workspace_manifest(workspace)
             if (
                 pre_agent_manifest is not None
                 and post_agent_manifest is not None
                 and expected_files is not None
             ):
-                phase = "final_workspace_verification"
                 final_verification = _run_traced_final_workspace_verification(
                     pre_agent_manifest,
                     post_agent_manifest,
-                    workspace_manifest(workspace),
+                    final_manifest,
                     expected_files,
                     active_tracer,
                 )
@@ -984,13 +1083,21 @@ def _resume_evaluation_locked(
     if session.status is ExecutionStatus.FINALIZING:
         return _finalize_execution(session, state_root=state_root)
 
+    validate_evaluation_control_paths(
+        (session.case,),
+        database_path=session.database_path,
+        state_root=state_root,
+    )
     workspace = validate_preserved_workspace(session.workspace)
     expected_files = _expected_modified_files(session.case)
     pre_agent_manifest = session.pre_agent_manifest
     post_agent_manifest = session.post_agent_manifest
     if expected_files is not None:
         try:
-            source_baseline = workspace_manifest(session.case.repository)
+            source_baseline = workspace_manifest(
+                session.case.repository,
+                allow_source_file_symlinks=True,
+            )
         except UnsupportedWorkspaceSymlinkError as error:
             raise ExecutionSessionError(f"Cannot resume execution: {error}") from error
         except OSError as error:
@@ -1055,8 +1162,10 @@ def _resume_evaluation_locked(
         )
         try:
             _run_traced_resume(active_adapter, workspace, session, tracer)
+            phase = "workspace_verification"
+            current_post_agent = workspace_manifest(workspace)
             if expected_files is not None:
-                post_agent_manifest = workspace_manifest(workspace)
+                post_agent_manifest = current_post_agent
         except AgentSuspended as suspended:
             if suspended.handle.adapter != session.adapter:
                 error = ValueError(
@@ -1103,12 +1212,13 @@ def _resume_evaluation_locked(
 
     if error_message is None:
         try:
+            phase = "workspace_verification"
+            current_post_agent = workspace_manifest(workspace)
             if (
                 pre_agent_manifest is not None
                 and post_agent_manifest is not None
                 and expected_files is not None
             ):
-                current_post_agent = workspace_manifest(workspace)
                 if current_post_agent != post_agent_manifest:
                     changed = verify_workspace_changes(
                         post_agent_manifest,
@@ -1138,16 +1248,17 @@ def _resume_evaluation_locked(
             phase = "pytest_after"
             after_result = _run_traced_pytest(workspace, tracer, phase)
             after_passed = after_result.passed
+            phase = "final_workspace_verification"
+            final_manifest = workspace_manifest(workspace)
             if (
                 pre_agent_manifest is not None
                 and post_agent_manifest is not None
                 and expected_files is not None
             ):
-                phase = "final_workspace_verification"
                 final_verification = _run_traced_final_workspace_verification(
                     pre_agent_manifest,
                     post_agent_manifest,
-                    workspace_manifest(workspace),
+                    final_manifest,
                     expected_files,
                     tracer,
                 )

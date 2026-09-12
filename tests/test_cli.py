@@ -40,6 +40,30 @@ class FailingStorage:
         raise StorageError("simulated database failure")
 
 
+def test_cli_rejects_database_inside_evaluated_source_before_creation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    database = repository / ".agentlab" / "agentlab.db"
+    monkeypatch.setenv("AGENTLAB_DB_PATH", str(database))
+    monkeypatch.setenv("AGENTLAB_STATE_ROOT", str((tmp_path / "state").resolve()))
+    monkeypatch.setattr(
+        "agentlab.cli.load_dataset",
+        lambda _dataset: [EvalCase("case-1", str(repository), "Fix it")],
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["eval", "dataset.yaml", "--agent", "mock_agent"],
+    )
+
+    assert result.exit_code == 1
+    assert "database path must remain outside" in result.stdout
+    assert not database.exists()
+
+
 def test_database_write_failure_does_not_leak_workspace(monkeypatch) -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-cli-") as directory:
         repository = Path(directory) / "repository"
@@ -541,6 +565,27 @@ def test_cli_resume_uses_stored_context_and_persists_completion(
         TraceEvent(
             "run-1",
             2,
+            "pytest_before_end",
+            timestamp,
+            {"status": "fail", "passed": False},
+        ),
+        TraceEvent(
+            "run-1",
+            3,
+            "agent_end",
+            timestamp,
+            {"status": "ok"},
+        ),
+        TraceEvent(
+            "run-1",
+            4,
+            "pytest_after_end",
+            timestamp,
+            {"status": "pass", "passed": True},
+        ),
+        TraceEvent(
+            "run-1",
+            5,
             "run_end",
             timestamp,
             {"passed": True, "elapsed_time": 1.0},

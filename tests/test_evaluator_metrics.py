@@ -357,13 +357,21 @@ def test_pass_rate_denominator_uses_verdicts_only() -> None:
     with tempfile.TemporaryDirectory(prefix="agentlab-eval-metrics-") as directory:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-mixed")
-        save_eval_run(storage, "exp-mixed", "run-1", evaluator_events=[outcome(score=0.9)])
         save_eval_run(
-            storage, "exp-mixed", "run-2", passed=False,
+            storage, "exp-mixed", "run-1", evaluator_events=[outcome(score=0.9)]
+        )
+        save_eval_run(
+            storage,
+            "exp-mixed",
+            "run-2",
+            passed=False,
             evaluator_events=[outcome("fail", score=0.1)],
         )
         save_eval_run(
-            storage, "exp-mixed", "run-3", passed=False,
+            storage,
+            "exp-mixed",
+            "run-3",
+            passed=False,
             evaluator_events=[outcome("error", score=None)],
         )
 
@@ -382,11 +390,15 @@ def test_null_scores_excluded_from_score_count() -> None:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-null-score")
         save_eval_run(
-            storage, "exp-null-score", "run-1",
+            storage,
+            "exp-null-score",
+            "run-1",
             evaluator_events=[outcome(score=None)],
         )
         save_eval_run(
-            storage, "exp-null-score", "run-2",
+            storage,
+            "exp-null-score",
+            "run-2",
             evaluator_events=[outcome(score=0.5)],
         )
 
@@ -402,7 +414,9 @@ def test_boundary_scores_are_counted(score: float) -> None:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-boundary")
         save_eval_run(
-            storage, "exp-boundary", "run-1",
+            storage,
+            "exp-boundary",
+            "run-1",
             evaluator_events=[outcome(score=score)],
         )
 
@@ -420,7 +434,9 @@ def test_average_min_max_scores() -> None:
         create_experiment(storage, "exp-spread")
         for index, score in enumerate([0.2, 0.4, 0.8]):
             save_eval_run(
-                storage, "exp-spread", f"run-{index}",
+                storage,
+                "exp-spread",
+                f"run-{index}",
                 evaluator_events=[outcome(score=score)],
             )
 
@@ -437,7 +453,9 @@ def test_evaluated_runs_uses_distinct_runs() -> None:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-distinct")
         save_eval_run(
-            storage, "exp-distinct", "run-1",
+            storage,
+            "exp-distinct",
+            "run-1",
             evaluator_events=[outcome(score=0.5), outcome(score=0.7)],
         )
 
@@ -453,11 +471,16 @@ def test_multiple_evaluators_aggregated_separately() -> None:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-multi")
         save_eval_run(
-            storage, "exp-multi", "run-1",
+            storage,
+            "exp-multi",
+            "run-1",
             evaluator_events=[outcome(score=0.9, evaluator="JudgeA")],
         )
         save_eval_run(
-            storage, "exp-multi", "run-2",
+            storage,
+            "exp-multi",
+            "run-2",
+            passed=False,
             evaluator_events=[outcome("fail", score=0.2, evaluator="JudgeB")],
         )
 
@@ -478,11 +501,15 @@ def test_evaluator_metrics_sorted_by_name() -> None:
         storage = SQLiteStorage(Path(directory) / "agentlab.db")
         create_experiment(storage, "exp-sorted")
         save_eval_run(
-            storage, "exp-sorted", "run-1",
+            storage,
+            "exp-sorted",
+            "run-1",
             evaluator_events=[outcome(evaluator="zeta")],
         )
         save_eval_run(
-            storage, "exp-sorted", "run-2",
+            storage,
+            "exp-sorted",
+            "run-2",
             evaluator_events=[outcome(evaluator="alpha")],
         )
 
@@ -611,11 +638,17 @@ def test_consistent_status_passed_combinations_accepted() -> None:
         create_experiment(storage, "exp-consistent")
         save_eval_run(storage, "exp-consistent", "run-1", evaluator_events=[outcome()])
         save_eval_run(
-            storage, "exp-consistent", "run-2", passed=False,
+            storage,
+            "exp-consistent",
+            "run-2",
+            passed=False,
             evaluator_events=[outcome("fail")],
         )
         save_eval_run(
-            storage, "exp-consistent", "run-3", passed=False,
+            storage,
+            "exp-consistent",
+            "run-3",
+            passed=False,
             evaluator_events=[outcome("error")],
         )
 
@@ -739,8 +772,7 @@ def test_comparison_identical_evaluator_sets_match() -> None:
     assert comparison.compatibility.candidate_only_evaluators == ()
     assert comparison.compatibility.is_equivalent is True
     assert not any(
-        "Evaluator mismatch" in warning
-        for warning in comparison.compatibility.warnings
+        "Evaluator mismatch" in warning for warning in comparison.compatibility.warnings
     )
 
 
@@ -796,8 +828,7 @@ def test_both_sides_without_evaluators_have_no_mismatch_warning() -> None:
     assert comparison.evaluator_metrics == ()
     assert comparison.compatibility.evaluator_sets_match is True
     assert not any(
-        "Evaluator mismatch" in warning
-        for warning in comparison.compatibility.warnings
+        "Evaluator mismatch" in warning for warning in comparison.compatibility.warnings
     )
     assert comparison.compatibility.is_equivalent is True
 
@@ -862,19 +893,29 @@ def test_storage_aggregation_to_comparison_integration() -> None:
             create_experiment(storage, experiment_id)
             storage.finish_experiment(experiment_id, "completed", _FINISHED_AT)
         save_eval_run(
-            storage, "base-exp", "base-1",
+            storage,
+            "base-exp",
+            "base-1",
             evaluator_events=[outcome(score=0.5, evaluator="judge")],
         )
         save_eval_run(
-            storage, "base-exp", "base-2", trial_index=2,
+            storage,
+            "base-exp",
+            "base-2",
+            trial_index=2,
             evaluator_events=[outcome(score=0.7, evaluator="judge")],
         )
         save_eval_run(
-            storage, "cand-exp", "cand-1",
+            storage,
+            "cand-exp",
+            "cand-1",
             evaluator_events=[outcome(score=0.9, evaluator="judge")],
         )
         save_eval_run(
-            storage, "cand-exp", "cand-2", trial_index=2,
+            storage,
+            "cand-exp",
+            "cand-2",
+            trial_index=2,
             evaluator_events=[outcome(score=1.0, evaluator="judge")],
         )
 
